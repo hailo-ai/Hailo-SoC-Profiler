@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #ifndef INCLUDE_PERFETTO_PUBLIC_FNV1A_H_
@@ -19,20 +21,24 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <string_view>
 
 #include "perfetto/public/compiler.h"
 
-static inline uint64_t PerfettoFnv1a(const void* data, size_t size) {
+static inline constexpr uint64_t PerfettoFnv1a(std::string_view str) {
   const uint64_t kFnv1a64OffsetBasis = 0xcbf29ce484222325;
   const uint64_t kFnv1a64Prime = 0x100000001b3;
 
   uint64_t value = kFnv1a64OffsetBasis;
 
-  for (size_t i = 0; i < size; i++) {
-    value =
-        (value ^ PERFETTO_STATIC_CAST(const uint8_t*, data)[i]) * kFnv1a64Prime;
+  for (char c : str) {
+    value = (value ^ PERFETTO_STATIC_CAST(uint8_t, c)) * kFnv1a64Prime;
   }
   return value;
+}
+
+static inline uint64_t PerfettoFnv1a(const void* data, size_t size) {
+  return PerfettoFnv1a(std::string_view(PERFETTO_STATIC_CAST(const char *, data), size));
 }
 
 #endif  // INCLUDE_PERFETTO_PUBLIC_FNV1A_H_

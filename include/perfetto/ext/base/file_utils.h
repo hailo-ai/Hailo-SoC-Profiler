@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #ifndef INCLUDE_PERFETTO_EXT_BASE_FILE_UTILS_H_
@@ -107,6 +109,14 @@ std::optional<uint64_t> GetFileSize(const std::string& path);
 
 // Returns the size of the open file |fd|, or nullopt in case of error.
 std::optional<uint64_t> GetFileSize(PlatformHandle fd);
+
+std::optional<uint64_t> GetFileValue(const std::string& path);
+
+bool SetFileValue(const std::string& path, uint64_t value);
+
+bool SetFileValueHex(const std::string& path, uint64_t value);
+
+bool SetFileContent(const std::string& path, const std::string& content);
 
 }  // namespace base
 }  // namespace perfetto

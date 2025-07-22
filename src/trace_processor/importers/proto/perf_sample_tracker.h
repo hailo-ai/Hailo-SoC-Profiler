@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #ifndef SRC_TRACE_PROCESSOR_IMPORTERS_PROTO_PERF_SAMPLE_TRACKER_H_
@@ -41,13 +43,16 @@ class PerfSampleTracker {
     tables::PerfSessionTable::Id perf_session_id;
     TrackId timebase_track_id = kInvalidTrackId;
     std::vector<TrackId> follower_track_ids;
+    std::vector<double> follower_multipliers;
 
     SamplingStreamInfo(tables::PerfSessionTable::Id _perf_session_id,
                        TrackId _timebase_track_id,
-                       std::vector<TrackId> _follower_track_ids)
+                       std::vector<TrackId> _follower_track_ids,
+                       std::vector<double> _follower_multipliers)
         : perf_session_id(_perf_session_id),
           timebase_track_id(_timebase_track_id),
-          follower_track_ids(std::move(_follower_track_ids)) {}
+          follower_track_ids(std::move(_follower_track_ids)),
+          follower_multipliers(std::move(_follower_multipliers)) {}
   };
 
   explicit PerfSampleTracker(TraceProcessorContext* context);
@@ -61,11 +66,14 @@ class PerfSampleTracker {
   struct CpuSequenceState {
     TrackId timebase_track_id = kInvalidTrackId;
     std::vector<TrackId> follower_track_ids;
+    std::vector<double> follower_multipliers;
 
     CpuSequenceState(TrackId _timebase_track_id,
-                     std::vector<TrackId> _follower_track_ids)
+      std::vector<TrackId> _follower_track_ids,
+      std::vector<double> _follower_multipliers)
         : timebase_track_id(_timebase_track_id),
-          follower_track_ids(std::move(_follower_track_ids)) {}
+          follower_track_ids(std::move(_follower_track_ids)),
+          follower_multipliers(std::move(_follower_multipliers)) {}
   };
 
   struct SequenceState {

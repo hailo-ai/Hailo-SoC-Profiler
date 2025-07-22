@@ -11,6 +11,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// This file has been modified by Hailo Technologies Ltd.
+//
 
 import {hsl} from 'color-convert';
 import {hash} from '../base/hash';
@@ -209,7 +212,8 @@ export function randomColor(): string {
 }
 
 export function getColorForSlice(sliceName: string): ColorScheme {
-  const name = sliceName.replace(/( )?\d+/g, '');
+  const name = sliceName.replace(/( )?(\d+)(?![^{]*})/g, '');
+
   if (USE_CONSISTENT_COLORS.get()) {
     return materialColorScheme(name);
   } else {

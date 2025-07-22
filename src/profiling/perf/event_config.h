@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #ifndef SRC_PROFILING_PERF_EVENT_CONFIG_H_
@@ -64,7 +66,13 @@ struct TargetFilter {
 // Timebase proto, but this won't fit with the eventual support of multiple
 // counters, as at the proto level it'll be a distinct message from Timebase.
 struct PerfCounter {
-  enum class Type { kBuiltinCounter, kTracepoint, kRawEvent };
+  enum class Type {
+    kBuiltinCounter,
+    kTracepoint,
+    kRawEvent,
+    kHailoNocEvent,
+    kHailoNocCounter
+  };
 
   Type type = Type::kBuiltinCounter;
 
@@ -79,6 +87,23 @@ struct PerfCounter {
   std::string tracepoint_name;
   // valid if kTracepoint
   std::string tracepoint_filter;
+  // valid if kHailoNocCounter
+  protos::gen::PerfEvents::HailoNocCounterType hailo_noc_counter_type =
+      protos::gen::PerfEvents::PerfEvents::UNKNOWN_HAILO_NOC_COUNTER;
+  uint32_t route_id_base;
+  uint32_t route_id_mask;
+  uint32_t opcode;
+  uint64_t address_base;
+  uint32_t length;
+  uint32_t urgency;
+  uint32_t window_size;
+  uint32_t status;
+  std::string noc_mode;
+
+  // valid if kHailoNocEvent
+  uint32_t sample_time_us;
+  protos::gen::PerfEvents::HailoNocRunningMode running_mode;
+  uint32_t sample_count_limit;
 
   // sycall-level description of the event (perf_event_attr):
   uint32_t attr_type = 0;
@@ -103,6 +128,24 @@ struct PerfCounter {
                               uint64_t config,
                               uint64_t config1,
                               uint64_t config2);
+
+  static PerfCounter HailoNocEvent(
+      uint32_t sample_time_us,
+      protos::gen::PerfEvents::HailoNocRunningMode running_mode,
+      uint32_t sample_count_limit);
+
+  static PerfCounter HailoNocCounter(
+      std::string name,
+      protos::gen::PerfEvents::HailoNocCounterType type,
+      uint32_t route_id_base,
+      uint32_t route_id_mask,
+      uint32_t opcode,
+      uint64_t address_base,
+      uint32_t length,
+      uint32_t urgency,
+      uint32_t window_size,
+      uint32_t status,
+      std::string noc_mode);
 };
 
 // Describes a single profiling configuration. Bridges the gap between the data
@@ -122,6 +165,7 @@ class EventConfig {
   // clang-format off
   RecordingMode recording_mode() const { return recording_mode_; }
   uint32_t ring_buffer_pages() const { return ring_buffer_pages_; }
+  uint32_t aux_ring_buffer_pages() const { return aux_ring_buffer_pages_; }
   uint32_t read_tick_period_ms() const { return read_tick_period_ms_; }
   uint64_t samples_per_tick_limit() const { return samples_per_tick_limit_; }
   uint32_t remote_descriptor_timeout_ms() const { return remote_descriptor_timeout_ms_; }
@@ -155,6 +199,7 @@ class EventConfig {
               protos::gen::PerfEventConfig::UnwindMode unwind_mode,
               TargetFilter target_filter,
               uint32_t ring_buffer_pages,
+              uint32_t aux_ring_buffer_pages,
               uint32_t read_tick_period_ms,
               uint64_t samples_per_tick_limit,
               uint32_t remote_descriptor_timeout_ms,
@@ -206,6 +251,10 @@ class EventConfig {
   // Size (in 4k pages) of each per-cpu ring buffer shared with the kernel.
   // Must be a power of two.
   const uint32_t ring_buffer_pages_;
+
+  // Size (in 4k pages) of each per-cpu AUX ring buffer shared with the kernel.
+  // Must be a power of two.
+  const uint32_t aux_ring_buffer_pages_;
 
   // In polling mode - how often to read the counters.
   // In sampling mode - how often to read the ring buffers.

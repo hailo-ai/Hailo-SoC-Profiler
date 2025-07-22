@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# This file has been modified by Hailo Technologies Ltd.
+#
 
 import("//build_overrides/build.gni")
 import("wasm_vars.gni")
@@ -172,6 +175,12 @@ declare_args() {
   # under gcc (_Atomic and other issues).
   enable_perfetto_traced_perf =
       perfetto_build_with_android ||
+      (perfetto_build_standalone &&
+       (is_linux || (is_android && android_api_level >= 29)))
+
+  # Build the perf event profiler's stack unwind support
+  enable_perfetto_traced_perf_unwind =
+      perfetto_build_with_android ||
       (perfetto_build_standalone && is_clang &&
        (is_linux || (is_android && android_api_level >= 29)))
 
@@ -264,6 +273,11 @@ declare_args() {
   if (!defined(enable_perfetto_system_consumer)) {
     enable_perfetto_system_consumer = enable_perfetto_ipc
   }
+}
+
+declare_args() {
+  enable_libunwindstack =
+      enable_perfetto_heapprofd || enable_perfetto_traced_perf_unwind
 }
 
 declare_args() {

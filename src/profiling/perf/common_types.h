@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #ifndef SRC_PROFILING_PERF_COMMON_TYPES_H_
@@ -23,9 +25,11 @@
 #include <linux/perf_event.h>
 #include <stdint.h>
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
 #include <unwindstack/Error.h>
 #include <unwindstack/Regs.h>
 #include <unwindstack/Unwinder.h>  // for FrameData
+#endif
 
 namespace perfetto {
 namespace profiling {
@@ -52,12 +56,16 @@ struct ParsedSample {
   ParsedSample& operator=(ParsedSample&&) noexcept = default;
 
   CommonSampleData common;
+  std::vector<char> aux;
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
   std::unique_ptr<unwindstack::Regs> regs;
   std::vector<char> stack;
   bool stack_maxed = false;
   std::vector<uint64_t> kernel_ips;
+#endif
 };
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
 // Entry in an unwinding queue. Either a sample that requires unwinding, or a
 // tombstoned entry (valid == false).
 struct UnwindEntry {
@@ -74,6 +82,7 @@ struct UnwindEntry {
   uint64_t data_source_id = 0;
   ParsedSample sample;
 };
+#endif /* Unwind */
 
 // Fully processed sample that is ready for output.
 struct CompletedSample {
@@ -85,9 +94,14 @@ struct CompletedSample {
   CompletedSample& operator=(CompletedSample&&) noexcept = default;
 
   CommonSampleData common;
+  std::vector<char> aux;
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
   std::vector<unwindstack::FrameData> frames;
+#endif
   std::vector<std::string> build_ids;
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
   unwindstack::ErrorCode unwind_error = unwindstack::ERROR_NONE;
+#endif
 };
 
 }  // namespace profiling

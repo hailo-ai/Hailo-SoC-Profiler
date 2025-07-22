@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 #include "src/trace_processor/importers/proto/perf_sample_tracker.h"
 
@@ -136,20 +138,6 @@ StringId InternTimebaseCounterName(
   return InternCounterName(perf_defaults, context, timebase);
 }
 
-std::vector<StringId> InternFollowersCounterName(
-    const protos::pbzero::PerfSampleDefaults::Decoder& perf_defaults,
-    TraceProcessorContext* context) {
-  using namespace protos::pbzero;
-
-  std::vector<StringId> string_ids;
-
-  for (auto it = perf_defaults.followers(); it; ++it) {
-    FollowerEvent::Decoder followers(*it);
-    string_ids.push_back(InternCounterName(perf_defaults, context, followers));
-  }
-
-  return string_ids;
-}
 }  // namespace
 
 PerfSampleTracker::PerfSampleTracker(TraceProcessorContext* context)
@@ -172,7 +160,8 @@ PerfSampleTracker::SamplingStreamInfo PerfSampleTracker::GetSamplingStreamInfo(
   auto cpu_it = seq_state->per_cpu.find(cpu);
   if (cpu_it != seq_state->per_cpu.end())
     return {seq_state->perf_session_id, cpu_it->second.timebase_track_id,
-            cpu_it->second.follower_track_ids};
+            cpu_it->second.follower_track_ids,
+            cpu_it->second.follower_multipliers};
 
   std::optional<PerfSampleDefaults::Decoder> perf_defaults;
   if (nullable_defaults && nullable_defaults->has_perf_sample_defaults()) {
@@ -190,33 +179,57 @@ PerfSampleTracker::SamplingStreamInfo PerfSampleTracker::GetSamplingStreamInfo(
   }
 
   base::StringView name = context_->storage->GetString(name_id);
-  TrackId timebase_track_id = context_->track_tracker->InternTrack(
-      tracks::kPerfCounterBlueprint,
-      tracks::Dimensions(cpu, session_id.value, name),
-      tracks::DynamicName(name_id),
-      [this](ArgsTracker::BoundInserter& inserter) {
-        inserter.AddArg(is_timebase_id_, Variadic::Boolean(true));
-      });
+  TrackId timebase_track_id = kInvalidTrackId;
+  if (!(perf_defaults.has_value() && perf_defaults->has_timebase() &&
+        protos::pbzero::PerfEvents::Timebase::Decoder(perf_defaults->timebase())
+            .has_hailo_noc_event())) {
+    timebase_track_id = context_->track_tracker->InternTrack(
+        tracks::kPerfCounterBlueprint,
+        tracks::Dimensions(cpu, session_id.value, name),
+        tracks::DynamicName(name_id),
+        [this](ArgsTracker::BoundInserter& inserter) {
+          inserter.AddArg(is_timebase_id_, Variadic::Boolean(true));
+        },
+        tracks::DynamicUnit(StringId::Null()));
+  }
 
   std::vector<TrackId> follower_track_ids;
+  std::vector<double> follower_multipliers;
   if (perf_defaults.has_value()) {
-    auto name_ids = InternFollowersCounterName(perf_defaults.value(), context_);
-    follower_track_ids.reserve(name_ids.size());
-    for (const auto& follower_name_id : name_ids) {
+    for (auto follower_it = perf_defaults->followers(); follower_it;
+         ++follower_it) {
+      protos::pbzero::FollowerEvent::Decoder follower(*follower_it);
+      StringId follower_name_id =
+          InternCounterName(perf_defaults.value(), context_, follower);
       base::StringView follower_name =
           context_->storage->GetString(follower_name_id);
+      StringId unit = StringId::Null();
+      double multiplier = 1.0;
+
+      if (follower.has_unit_name()) {
+        unit = tracks::DynamicUnit(
+            context_->storage->InternString(follower.unit_name()));
+      }
+
       follower_track_ids.push_back(context_->track_tracker->InternTrack(
           tracks::kPerfCounterBlueprint,
           tracks::Dimensions(cpu, session_id.value, follower_name),
           tracks::DynamicName(follower_name_id),
           [this](ArgsTracker::BoundInserter& inserter) {
             inserter.AddArg(is_timebase_id_, Variadic::Boolean(true));
-          }));
+          },
+          unit));
+
+      if (follower.has_multiplier()) {
+        multiplier = follower.multiplier();
+      }
+      follower_multipliers.push_back(multiplier);
     }
   }
 
   seq_state->per_cpu.emplace(
-      cpu, CpuSequenceState{timebase_track_id, follower_track_ids});
+      cpu, CpuSequenceState{timebase_track_id, follower_track_ids,
+                            follower_multipliers});
 
   // If the config requested process sharding, record in the stats table which
   // shard was chosen for the trace. It should be the same choice for all data
@@ -232,7 +245,8 @@ PerfSampleTracker::SamplingStreamInfo PerfSampleTracker::GetSamplingStreamInfo(
         static_cast<int64_t>(perf_defaults->chosen_process_shard()));
   }
 
-  return {session_id, timebase_track_id, std::move(follower_track_ids)};
+  return {session_id, timebase_track_id, std::move(follower_track_ids),
+          std::move(follower_multipliers)};
 }
 
 tables::PerfSessionTable::Id PerfSampleTracker::CreatePerfSession() {

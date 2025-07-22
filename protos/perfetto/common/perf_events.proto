@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 syntax = "proto2";
@@ -23,6 +25,7 @@ message PerfEvents {
   // counter is the "group leader".
   // Commented from the perspective of its use in |PerfEventConfig|.
   // Next id: 12
+  // Next hailo id: 901
   message Timebase {
     // How often to snapshot the counter, along with any follower events and
     // any additional sampled data such as callstacks.
@@ -69,6 +72,7 @@ message PerfEvents {
       Counter counter = 4;
       Tracepoint tracepoint = 3;
       RawEvent raw_event = 5;
+      HailoNocEvent hailo_noc_event = 900;
     }
 
     // If set, samples will be timestamped with the given clock.
@@ -170,6 +174,51 @@ message PerfEvents {
     PERF_CLOCK_MONOTONIC_RAW = 3;
     PERF_CLOCK_BOOTTIME = 4;
   }
+
+  enum HailoNocRunningMode {
+    HAILO_NOC_RUNNING_MODE_GTIMER = 0;
+    HAILO_NOC_RUNNING_MODE_FREERUNNING = 1;
+  }
+  message HailoNocEvent {
+    optional uint32 sample_time_us = 1;
+    optional HailoNocRunningMode running_mode = 2;
+    optional uint32 sample_count_limit = 3; // 0 means no limit
+  }
+
+  message HailoNocRouteId {
+    optional uint32 route_id_base = 1;
+    optional uint32 route_id_mask = 2;
+  }
+
+  enum HailoNocCounterType {
+    UNKNOWN_HAILO_NOC_COUNTER = 0;
+    HAILO_NOC_COUNTER_0 = 1;
+    HAILO_NOC_COUNTER_1 = 2;
+    HAILO_NOC_COUNTER_2 = 3;
+    HAILO_NOC_COUNTER_3 = 4;
+    HAILO_NOC_COUNTER_4 = 8; // Not available in Hailo-15
+    HAILO_DSM_RX_COUNTER = 5;
+    HAILO_DSM_TX_COUNTER = 6;
+    HAILO_CSM_COUNTER = 7;
+  }
+
+  message HailoNocCounterFollowerEvent {
+    optional PerfEvents.HailoNocCounterType type = 1;
+    oneof route {
+      HailoNocRouteId route_id = 2;
+      string filter = 3;
+    }
+    oneof opcode_oneof {
+      uint32 opcode = 4; // default is not to filter by opcode
+      string access_type = 5; // Access type = read/write
+    }
+    optional uint64 address_base = 6; // default is not to filter by address
+    optional uint32 length = 7; // default is not to filter by length
+    optional uint32 urgency = 8; // default is not to filter by urgency
+    optional uint32 window_size = 9; // default is not to filter by window size
+    optional string mode = 10; // default is filter mode, can also be 'total'
+    optional uint32 status = 11; // default is not to filter by status
+  }
 }
 
 // Additional events associated with a leader.
@@ -181,6 +230,9 @@ message FollowerEvent {
     PerfEvents.Counter counter = 1;
     PerfEvents.Tracepoint tracepoint = 2;
     PerfEvents.RawEvent raw_event = 3;
+    PerfEvents.HailoNocCounterFollowerEvent hailo_noc_counter = 900;
   }
   optional string name = 4;
+  optional string unit_name = 901;
+  optional double multiplier = 902; // Multiplier to apply to the event value.
 }

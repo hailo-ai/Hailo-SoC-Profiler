@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 syntax = "proto2";
@@ -37,6 +39,7 @@ package perfetto.protos;
 //   }
 //
 // Next id: 20
+// Next hailo id: 901
 message PerfEventConfig {
   // What event to sample on, and how often.
   // Defined in common/perf_events.proto.
@@ -62,6 +65,11 @@ message PerfEventConfig {
   // kernel. If set, must be a power of two.
   // If unset, an implementation-defined default is used.
   optional uint32 ring_buffer_pages = 3;
+
+  // Size (in 4k pages) of each per-cpu AUX ring buffer that is filled by the
+  // kernel. If set, must be a power of two.
+  // If unset, 0 is used.
+  optional uint32 aux_ring_buffer_pages = 900;
 
   //
   // Daemon's resource usage limits:

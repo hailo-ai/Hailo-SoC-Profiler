@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #ifndef SRC_TRACE_PROCESSOR_IMPORTERS_COMMON_TRACKS_COMMON_H_
@@ -238,7 +240,7 @@ inline constexpr auto kMmEventThreadFallbackBlueprint =
 
 inline constexpr auto kPerfCounterBlueprint = tracks::CounterBlueprint(
     "perf_counter",
-    tracks::UnknownUnitBlueprint(),
+    tracks::DynamicUnitBlueprint(),
     tracks::DimensionBlueprints(
         tracks::kCpuDimensionBlueprint,
         tracks::UintDimensionBlueprint("perf_session_id"),

@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #include "src/trace_processor/importers/perf/perf_event_attr.h"
@@ -166,7 +168,8 @@ PerfCounter PerfEventAttr::CreateCounter(uint32_t cpu) const {
       [this](ArgsTracker::BoundInserter& inserter) {
         inserter.AddArg(context_->storage->InternString("is_timebase"),
                         Variadic::Boolean(is_timebase()));
-      });
+      },
+      tracks::DynamicUnit(StringId::Null()));
   return {context_->storage->mutable_counter_table(), track_id, is_timebase()};
 }
 

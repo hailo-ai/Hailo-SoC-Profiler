@@ -11,6 +11,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// This file has been modified by Hailo Technologies Ltd.
+//
 
 .pf-viewer-page {
   isolation: isolate;
@@ -43,7 +46,7 @@
 
   &__pinned-track-tree {
     flex: 0 0 auto;
-    max-height: 40%;
+    max-height: 60%;
     z-index: 1;
     box-shadow: 1px 3px 15px rgba(23, 32, 44, 0.3);
     scrollbar-gutter: stable;

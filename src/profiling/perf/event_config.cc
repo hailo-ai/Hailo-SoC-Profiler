@@ -12,9 +12,12 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #include "src/profiling/perf/event_config.h"
+#include "src/profiling/perf/hailo_noc.h"
 
 #include <linux/perf_event.h>
 #include <time.h>
@@ -23,13 +26,19 @@
 #include <optional>
 #include <vector>
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
 #include <unwindstack/Regs.h>
+#endif
 
 #include "perfetto/base/flat_set.h"
+#include "perfetto/base/logging.h"
 #include "perfetto/ext/base/utils.h"
 #include "protos/perfetto/common/perf_events.gen.h"
 #include "protos/perfetto/config/profiling/perf_event_config.gen.h"
+
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
 #include "src/profiling/perf/regs_parsing.h"
+#endif
 
 namespace perfetto {
 namespace profiling {
@@ -120,6 +129,20 @@ std::optional<uint32_t> ChooseActualRingBufferPages(uint32_t config_value) {
   if (!config_value) {
     static_assert(IsPowerOfTwo(kDefaultDataPagesPerRingBuffer), "");
     return std::make_optional(kDefaultDataPagesPerRingBuffer);
+  }
+
+  if (!IsPowerOfTwo(config_value)) {
+    PERFETTO_ELOG("kernel buffer size must be a power of two pages");
+    return std::nullopt;
+  }
+
+  return std::make_optional(config_value);
+}
+
+// returns |std::nullopt| if the input is invalid.
+std::optional<uint32_t> ChooseActualAuxRingBufferPages(uint32_t config_value) {
+  if (!config_value) {
+    return std::make_optional(0);
   }
 
   if (!IsPowerOfTwo(config_value)) {
@@ -267,11 +290,20 @@ std::optional<PerfCounter> MakePerfCounter(
     const auto& raw = event_desc.raw_event();
     return PerfCounter::RawEvent(name, raw.type(), raw.config(), raw.config1(),
                                  raw.config2());
-  } else {
-    return PerfCounter::BuiltinCounter(
-        name, protos::gen::PerfEvents::PerfEvents::SW_CPU_CLOCK,
-        PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK);
+  } else if constexpr (std::is_same_v<
+                           T, perfetto::protos::gen::PerfEvents_Timebase>) {
+    if (event_desc.has_hailo_noc_event()) {
+      return HailoNocEventToPerfCounter(event_desc.hailo_noc_event());
+    }
+  } else if constexpr (std::is_same_v<T,
+                                      perfetto::protos::gen::FollowerEvent>) {
+    if (event_desc.has_hailo_noc_counter()) {
+      return HailoNocCounterToPerfCounter(name, event_desc.hailo_noc_counter());
+    }
   }
+  return PerfCounter::BuiltinCounter(
+      name, protos::gen::PerfEvents::PerfEvents::SW_CPU_CLOCK,
+      PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK);
 }
 
 bool IsSupportedUnwindMode(
@@ -337,6 +369,67 @@ PerfCounter PerfCounter::RawEvent(std::string name,
   ret.attr_config = config;
   ret.attr_config1 = config1;
   ret.attr_config2 = config2;
+  return ret;
+}
+
+// static
+PerfCounter PerfCounter::HailoNocEvent(
+    uint32_t sample_time_us,
+    protos::gen::PerfEvents::HailoNocRunningMode running_mode,
+    uint32_t sample_count_limit) {
+  PerfCounter ret;
+  ret.type = PerfCounter::Type::kHailoNocEvent;
+  ret.name = "hailo-noc";
+
+  auto type = GetHailoNocPerfEventType();
+  if (!type.value()) {
+    PERFETTO_FATAL("Failed to get Hailo NOC perf event type");
+  }
+  ret.attr_type = type.value();
+
+  // Store the parameters directly
+  ret.sample_time_us = sample_time_us;
+  ret.running_mode = running_mode;
+  ret.sample_count_limit = sample_count_limit;
+
+  // Pack sample_time_us into the high 32 bits of attr_config and sample_count_limit into low 32 bits
+  ret.attr_config = (((uint64_t)ret.sample_time_us) << 32) | ret.sample_count_limit;
+
+  if (ret.running_mode == protos::gen::PerfEvents::HAILO_NOC_RUNNING_MODE_FREERUNNING) {
+    ret.attr_config1 = (1ULL << 8);
+  }
+  return ret;
+}
+
+// static
+PerfCounter PerfCounter::HailoNocCounter(
+    std::string name,
+    protos::gen::PerfEvents::HailoNocCounterType type,
+    uint32_t route_id_base,
+    uint32_t route_id_mask,
+    uint32_t opcode,
+    uint64_t address_base,
+    uint32_t length,
+    uint32_t urgency,
+    uint32_t window_size,
+    uint32_t status,
+    std::string mode) {
+  PerfCounter ret;
+  ret.type = PerfCounter::Type::kHailoNocCounter;
+  ret.name = std::move(name);
+  ret.hailo_noc_counter_type = type;
+
+  // Set all parameters directly
+  ret.route_id_base = route_id_base;
+  ret.route_id_mask = route_id_mask;
+  ret.opcode = opcode;
+  ret.address_base = address_base;
+  ret.length = length;
+  ret.urgency = urgency;
+  ret.window_size = window_size;
+  ret.status = status;
+  ret.noc_mode = std::move(mode);
+
   return ret;
 }
 
@@ -409,6 +502,11 @@ std::optional<EventConfig> EventConfig::CreatePolling(
     pe_followers.reserve(followers.size());
   }
   for (const auto& e : followers) {
+    if (e.type == PerfCounter::Type::kHailoNocCounter) {
+      // Hailo NOC counters are not using perf event for follower events
+      continue;
+    }
+
     perf_event_attr pe_follower = {};
     pe_follower.size = sizeof(perf_event_attr);
     pe_follower.disabled = 0;  // activated when the timebase is activated
@@ -437,7 +535,8 @@ std::optional<EventConfig> EventConfig::CreatePolling(
       std::move(followers), RecordingMode::kPolling,
       /*kernel_frames=*/false,
       /*unwind_mode=*/protos::gen::PerfEventConfig::UNWIND_SKIP,
-      /*target_filter=*/{}, /*ring_buffer_pages=*/0, poll_period_ms,
+      /*target_filter=*/{}, /*ring_buffer_pages=*/0,
+      /*aux_ring_buffer_pages=*/0, poll_period_ms,
       /*samples_per_tick_limit=*/1, /*remote_descriptor_timeout_ms=*/0,
       /*unwind_state_clear_period_ms=*/0, /*max_enqueued_footprint_bytes=*/0,
       /*target_installed_by=*/{});
@@ -498,6 +597,12 @@ std::optional<EventConfig> EventConfig::CreateSampling(
   std::optional<uint32_t> ring_buffer_pages =
       ChooseActualRingBufferPages(pb_config.ring_buffer_pages());
   if (!ring_buffer_pages.has_value())
+    return std::nullopt;
+
+  // Aux ring buffer options.
+  std::optional<uint32_t> aux_ring_buffer_pages =
+      ChooseActualAuxRingBufferPages(pb_config.aux_ring_buffer_pages());
+  if (!aux_ring_buffer_pages.has_value())
     return std::nullopt;
 
   uint32_t read_tick_period_ms = pb_config.ring_buffer_read_period_ms()
@@ -563,6 +668,7 @@ std::optional<EventConfig> EventConfig::CreateSampling(
   pe.clockid = ToClockId(pb_config.timebase().timestamp_clock());
   pe.use_clockid = true;
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
   if (IsUserFramesEnabled(unwind_mode)) {
     pe.sample_type |= PERF_SAMPLE_STACK_USER | PERF_SAMPLE_REGS_USER;
     // PERF_SAMPLE_STACK_USER:
@@ -579,6 +685,7 @@ std::optional<EventConfig> EventConfig::CreateSampling(
     pe.sample_type |= PERF_SAMPLE_CALLCHAIN;
     pe.exclude_callchain_user = true;
   }
+#endif
 
   // Additional counters to include whenever the timebase is sampled, each
   // configured as a separate call to perf_event_open.
@@ -589,6 +696,10 @@ std::optional<EventConfig> EventConfig::CreateSampling(
   }
 
   for (const auto& e : followers) {
+    if (e.type == PerfCounter::Type::kHailoNocCounter) {
+      // Hailo NOC counters are not using perf event for follower events
+      continue;
+    }
     perf_event_attr pe_follower = {};
     pe_follower.size = sizeof(perf_event_attr);
     pe_follower.disabled = 0;  // activated when the timebase is activated
@@ -608,7 +719,8 @@ std::optional<EventConfig> EventConfig::CreateSampling(
       raw_ds_config, pe, std::move(pe_followers), std::move(timebase_event),
       std::move(followers), RecordingMode::kSampling, kernel_frames,
       unwind_mode, std::move(target_filter), ring_buffer_pages.value(),
-      read_tick_period_ms, samples_per_tick_limit, remote_descriptor_timeout_ms,
+      aux_ring_buffer_pages.value(), read_tick_period_ms,
+      samples_per_tick_limit, remote_descriptor_timeout_ms,
       pb_config.unwind_state_clear_period_ms(), max_enqueued_footprint_bytes,
       pb_config.target_installed_by());
 }
@@ -627,6 +739,8 @@ bool EventConfig::IsUserFramesEnabled(
     case PerfEventConfig::UNWIND_SKIP:
       return false;
   }
+  // to silence GCC
+  return false;
 }
 
 EventConfig::EventConfig(const DataSourceConfig& raw_ds_config,
@@ -639,6 +753,7 @@ EventConfig::EventConfig(const DataSourceConfig& raw_ds_config,
                          protos::gen::PerfEventConfig::UnwindMode unwind_mode,
                          TargetFilter target_filter,
                          uint32_t ring_buffer_pages,
+                         uint32_t aux_ring_buffer_pages,
                          uint32_t read_tick_period_ms,
                          uint64_t samples_per_tick_limit,
                          uint32_t remote_descriptor_timeout_ms,
@@ -654,6 +769,7 @@ EventConfig::EventConfig(const DataSourceConfig& raw_ds_config,
       unwind_mode_(unwind_mode),
       target_filter_(std::move(target_filter)),
       ring_buffer_pages_(ring_buffer_pages),
+      aux_ring_buffer_pages_(aux_ring_buffer_pages),
       read_tick_period_ms_(read_tick_period_ms),
       samples_per_tick_limit_(samples_per_tick_limit),
       remote_descriptor_timeout_ms_(remote_descriptor_timeout_ms),

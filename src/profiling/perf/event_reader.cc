@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #include "src/profiling/perf/event_reader.h"
@@ -27,7 +29,10 @@
 #include "perfetto/base/time.h"
 #include "perfetto/ext/base/utils.h"
 #include "src/profiling/perf/common_types.h"
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
 #include "src/profiling/perf/regs_parsing.h"
+#endif
+#include "src/profiling/perf/hailo_noc.h"
 
 namespace perfetto {
 namespace profiling {
@@ -88,13 +93,21 @@ bool MaybeApplyTracepointFilter(int fd, const PerfCounter& event) {
 
 PerfRingBuffer::PerfRingBuffer(PerfRingBuffer&& other) noexcept
     : metadata_page_(other.metadata_page_),
+      control_(other.control_),
+      aux_ring_buffer_(std::move(other.aux_ring_buffer_)),
+      mmap_addr_(other.mmap_addr_),
       mmap_sz_(other.mmap_sz_),
       data_buf_(other.data_buf_),
-      data_buf_sz_(other.data_buf_sz_) {
+      data_buf_sz_(other.data_buf_sz_),
+      is_aux_(other.is_aux_) {
   other.metadata_page_ = nullptr;
+  other.mmap_addr_ = 0;
   other.mmap_sz_ = 0;
   other.data_buf_ = nullptr;
   other.data_buf_sz_ = 0;
+  other.control_ = nullptr;
+  other.aux_ring_buffer_ = nullptr;
+  other.is_aux_ = false;
 }
 
 PerfRingBuffer& PerfRingBuffer::operator=(PerfRingBuffer&& other) noexcept {
@@ -110,14 +123,16 @@ PerfRingBuffer::~PerfRingBuffer() {
   if (!valid())
     return;
 
-  if (munmap(reinterpret_cast<void*>(metadata_page_), mmap_sz_) != 0)
+  if (munmap(mmap_addr_, mmap_sz_) != 0)
     PERFETTO_PLOG("failed munmap");
 }
 
 std::optional<PerfRingBuffer> PerfRingBuffer::Allocate(int perf_fd,
-                                                       size_t data_page_count) {
+                                                       size_t data_page_count,
+                                                       size_t aux_page_count) {
   // perf_event_open requires the ring buffer to be a power of two in size.
   PERFETTO_DCHECK(IsPowerOfTwo(data_page_count));
+  PERFETTO_DCHECK(IsPowerOfTwo(aux_page_count));
 
   PerfRingBuffer ret;
 
@@ -126,18 +141,66 @@ std::optional<PerfRingBuffer> PerfRingBuffer::Allocate(int perf_fd,
   ret.mmap_sz_ = ret.data_buf_sz_ + base::GetSysPageSize();
 
   // If PROT_WRITE, kernel won't overwrite unread samples.
-  void* mmap_addr = mmap(nullptr, ret.mmap_sz_, PROT_READ | PROT_WRITE,
-                         MAP_SHARED, perf_fd, 0);
-  if (mmap_addr == MAP_FAILED) {
+  ret.mmap_addr_ = mmap(nullptr, ret.mmap_sz_, PROT_READ | PROT_WRITE,
+                        MAP_SHARED, perf_fd, 0);
+  if (ret.mmap_addr_ == MAP_FAILED) {
     PERFETTO_PLOG("failed mmap");
     return std::nullopt;
   }
 
-  // Expected layout is [ metadata page ] [ data pages ... ]
-  ret.metadata_page_ = reinterpret_cast<perf_event_mmap_page*>(mmap_addr);
-  ret.data_buf_ = reinterpret_cast<char*>(mmap_addr) + base::GetSysPageSize();
+  // Expected layout is [ metadata page ] [ data pages ... ] [optional: aux
+  // pages ... ]
+  ret.metadata_page_ = reinterpret_cast<perf_event_mmap_page*>(ret.mmap_addr_);
+  ret.data_buf_ =
+      reinterpret_cast<char*>(ret.mmap_addr_) + base::GetSysPageSize();
   PERFETTO_CHECK(ret.metadata_page_->data_offset == base::GetSysPageSize());
   PERFETTO_CHECK(ret.metadata_page_->data_size == ret.data_buf_sz_);
+  ret.control_ =
+      reinterpret_cast<PerfRingControl*>(&ret.metadata_page_->data_head);
+
+  PERFETTO_DCHECK(IsPowerOfTwo(ret.data_buf_sz_));
+
+  if (aux_page_count) {
+    ret.aux_ring_buffer_ =
+        std::unique_ptr<PerfRingBuffer>(new PerfRingBuffer());
+    auto aux_ret = AllocateAux(perf_fd, ret, aux_page_count);
+    if (!aux_ret.has_value())
+      return std::nullopt;
+    *ret.aux_ring_buffer_ = std::move(aux_ret.value());
+  }
+  return std::make_optional(std::move(ret));
+}
+
+std::optional<PerfRingBuffer> PerfRingBuffer::AllocateAux(
+    int perf_fd,
+    PerfRingBuffer& data_ring_buffer,
+    size_t aux_page_count) {
+  PERFETTO_DCHECK(IsPowerOfTwo(aux_page_count));
+
+  PerfRingBuffer ret;
+
+  ret.is_aux_ = true;
+  ret.data_buf_sz_ = aux_page_count * base::GetSysPageSize();
+  ret.mmap_sz_ = ret.data_buf_sz_;
+
+  ret.metadata_page_ = data_ring_buffer.metadata_page_;
+  ret.metadata_page_->aux_offset = data_ring_buffer.mmap_sz_;
+  ret.metadata_page_->aux_size = ret.mmap_sz_;
+
+  // If PROT_WRITE, kernel won't overwrite unread samples.
+  ret.mmap_addr_ = mmap(nullptr, ret.mmap_sz_, PROT_READ | PROT_WRITE,
+                        MAP_SHARED, perf_fd, ret.metadata_page_->aux_offset);
+  if (ret.mmap_addr_ == MAP_FAILED) {
+    PERFETTO_PLOG("failed aux mmap");
+    return std::nullopt;
+  }
+
+  // Expected layout is [ metadata page ] [ data pages ... ] [optional: aux
+  // pages ... ]
+
+  ret.data_buf_ = reinterpret_cast<char*>(ret.mmap_addr_);
+  ret.control_ =
+      reinterpret_cast<PerfRingControl*>(&ret.metadata_page_->aux_head);
 
   PERFETTO_DCHECK(IsPowerOfTwo(ret.data_buf_sz_));
 
@@ -150,19 +213,21 @@ std::optional<PerfRingBuffer> PerfRingBuffer::Allocate(int perf_fd,
 // TODO(rsavitski): is there false sharing between |data_tail| and |data_head|?
 // Is there an argument for maintaining our own copy of |data_tail| instead of
 // reloading it?
-char* PerfRingBuffer::ReadRecordNonconsuming() {
+// size is needed when accessing aux buffer only, set to 0 otherwise
+char* PerfRingBuffer::ReadRecordNonconsuming(uint32_t size /* = 0 */) {
   static_assert(sizeof(std::atomic<uint64_t>) == sizeof(uint64_t));
 
   PERFETTO_DCHECK(valid());
+  PERFETTO_DCHECK((is_aux_ && size > 0) || (!is_aux_ && size == 0));
 
   // |data_tail| is written only by this userspace thread, so we can safely read
   // it without any synchronization.
-  uint64_t read_offset = metadata_page_->data_tail;
+  uint64_t read_offset = control_->tail;
 
   // |data_head| is written by the kernel, perform an acquiring load such that
   // the payload reads below are ordered after this load.
   uint64_t write_offset =
-      reinterpret_cast<std::atomic<uint64_t>*>(&metadata_page_->data_head)
+      reinterpret_cast<std::atomic<uint64_t>*>(&control_->head)
           ->load(std::memory_order_acquire);
 
   PERFETTO_DCHECK(read_offset <= write_offset);
@@ -176,18 +241,21 @@ char* PerfRingBuffer::ReadRecordNonconsuming() {
   PERFETTO_DCHECK(0 == reinterpret_cast<size_t>(data_buf_ + read_pos) %
                            alignof(perf_event_header));
 
-  perf_event_header* evt_header =
-      reinterpret_cast<perf_event_header*>(data_buf_ + read_pos);
-  uint16_t evt_size = evt_header->size;
+  if (!is_aux_) {
+    perf_event_header* evt_header =
+        reinterpret_cast<perf_event_header*>(data_buf_ + read_pos);
+    size = evt_header->size;
+  }
 
   // event wrapped - reconstruct it, and return a pointer to the buffer
-  if (read_pos + evt_size > data_buf_sz_) {
+  if (read_pos + size > data_buf_sz_) {
     PERFETTO_DLOG("PerfRingBuffer: returning reconstructed event");
+
+    PERFETTO_CHECK(size <= sizeof(reconstructed_record_));
 
     size_t prefix_sz = data_buf_sz_ - read_pos;
     memcpy(&reconstructed_record_[0], data_buf_ + read_pos, prefix_sz);
-    memcpy(&reconstructed_record_[0] + prefix_sz, data_buf_,
-           evt_size - prefix_sz);
+    memcpy(&reconstructed_record_[0] + prefix_sz, data_buf_, size - prefix_sz);
     return &reconstructed_record_[0];
   } else {
     // usual case - contiguous sample
@@ -203,9 +271,18 @@ void PerfRingBuffer::Consume(size_t bytes) {
   // payload reads are ordered before it. The reader in this case is the kernel,
   // which reads |data_tail| to calculate the available ring buffer capacity
   // before trying to store a new record.
-  uint64_t updated_tail = metadata_page_->data_tail + bytes;
-  reinterpret_cast<std::atomic<uint64_t>*>(&metadata_page_->data_tail)
+  uint64_t updated_tail = control_->tail + bytes;
+  reinterpret_cast<std::atomic<uint64_t>*>(&control_->tail)
       ->store(updated_tail, std::memory_order_release);
+}
+
+void PerfRingBuffer::ReadAux(char* buffer, uint32_t size) {
+  PERFETTO_CHECK(!is_aux_);
+  PERFETTO_CHECK(aux_ring_buffer_);
+
+  char* aux_data = aux_ring_buffer_->ReadRecordNonconsuming(size);
+  memcpy(buffer, aux_data, size);
+  aux_ring_buffer_->Consume(size);
 }
 
 EventReader::EventReader(uint32_t cpu,
@@ -231,21 +308,18 @@ EventReader& EventReader::operator=(EventReader&& other) noexcept {
 std::optional<EventReader> EventReader::ConfigureEvents(
     uint32_t cpu,
     const EventConfig& event_cfg) {
+  // For Hailo NOC events, call PreconfigureHailoNocEvent before opening the perf event
+  if (event_cfg.timebase_event().type == PerfCounter::Type::kHailoNocEvent) {
+    if (!PreconfigureHailoNocEvent(event_cfg)) {
+      PERFETTO_ELOG("Failed to preconfigure Hailo NOC event");
+      return std::nullopt;
+    }
+  }
+
   auto timebase_fd = PerfEventOpen(cpu, event_cfg.perf_attr());
   if (!timebase_fd) {
     PERFETTO_PLOG("Failed perf_event_open");
     return std::nullopt;
-  }
-
-  // Open followers.
-  std::vector<base::ScopedFile> follower_fds;
-  for (auto follower_attr : event_cfg.perf_attr_followers()) {
-    auto follower_fd = PerfEventOpen(cpu, &follower_attr, timebase_fd.get());
-    if (!follower_fd) {
-      PERFETTO_PLOG("Failed perf_event_open (follower)");
-      return std::nullopt;
-    }
-    follower_fds.push_back(std::move(follower_fd));
   }
 
   // Optional: apply the tracepoint filter to the timebase.
@@ -253,21 +327,45 @@ std::optional<EventReader> EventReader::ConfigureEvents(
                                   event_cfg.timebase_event()))
     return std::nullopt;
 
-  // Optional: apply tracepoint filters to the followers.
-  if (follower_fds.size() != event_cfg.follower_events().size()) {
-    return std::nullopt;
-  }
-  for (size_t i = 0; i < follower_fds.size(); ++i) {
-    if (!MaybeApplyTracepointFilter(follower_fds[i].get(),
-                                    event_cfg.follower_events()[i]))
+  // Open followers.
+  std::vector<base::ScopedFile> follower_fds;
+  auto follower_attr_it = event_cfg.perf_attr_followers().begin();
+
+  for (auto follower_event : event_cfg.follower_events()) {
+    if (follower_event.type == PerfCounter::Type::kHailoNocCounter) {
+      // Hailo NOC counters are not using perf event for follower events
+      continue;
+    }
+
+    if (follower_attr_it == event_cfg.perf_attr_followers().end()) {
+      PERFETTO_ELOG("Missing perf_attr for follower event");
       return std::nullopt;
+    }
+
+    perf_event_attr follower_attr = *follower_attr_it;
+    auto follower_fd = PerfEventOpen(cpu, &follower_attr, timebase_fd.get());
+    if (!follower_fd) {
+      PERFETTO_PLOG("Failed perf_event_open (follower)");
+      return std::nullopt;
+    }
+    if (!MaybeApplyTracepointFilter(follower_fd.get(), follower_event)) {
+      return std::nullopt;
+    }
+
+    follower_fds.push_back(std::move(follower_fd));
+
+    follower_attr_it++;
   }
+
+  // Check that we have opened all the followers.
+  PERFETTO_CHECK(follower_attr_it == event_cfg.perf_attr_followers().end());
 
   // Sampling mode: mmap the ring buffer.
   std::optional<PerfRingBuffer> ring_buffer;
   if (event_cfg.recording_mode() == RecordingMode::kSampling) {
     ring_buffer = PerfRingBuffer::Allocate(timebase_fd.get(),
-                                           event_cfg.ring_buffer_pages());
+                                           event_cfg.ring_buffer_pages(),
+                                           event_cfg.aux_ring_buffer_pages());
     if (!ring_buffer.has_value()) {
       return std::nullopt;
     }
@@ -312,6 +410,7 @@ std::optional<CommonSampleData> EventReader::ReadCounters() {
   ssize_t rd = read(*perf_fd_, buf, rd_size);
   if (PERFETTO_UNLIKELY(rd != static_cast<ssize_t>(rd_size))) {
     PERFETTO_PLOG("read() of perf event failed");
+
     return std::nullopt;
   }
 
@@ -345,6 +444,12 @@ std::optional<ParsedSample> EventReader::ReadUntilSample(
 
     if (event_hdr->type == PERF_RECORD_SAMPLE) {
       ParsedSample sample = ParseSampleRecord(cpu_, event);
+      ring_buffer_->Consume(event_hdr->size);
+      return std::make_optional(std::move(sample));
+    }
+
+    if (event_hdr->type == PERF_RECORD_AUX) {
+      ParsedSample sample = ParseAuxRecord(event, *ring_buffer_);
       ring_buffer_->Consume(event_hdr->size);
       return std::make_optional(std::move(sample));
     }
@@ -435,6 +540,7 @@ ParsedSample EventReader::ParseSampleRecord(uint32_t cpu,
     }
   }
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
   if (event_attr_.sample_type & PERF_SAMPLE_CALLCHAIN) {
     uint64_t chain_len = 0;
     parse_pos = ReadValue(&chain_len, parse_pos);
@@ -473,8 +579,33 @@ ParsedSample EventReader::ParseSampleRecord(uint32_t cpu,
       sample.stack_maxed = (filled_stack_size == max_stack_size);
     }
   }
+#endif /* Unwind */
 
   PERFETTO_CHECK(parse_pos == record_start + sample_size);
+  return sample;
+}
+
+ParsedSample EventReader::ParseAuxRecord(const char* record_start,
+                                         PerfRingBuffer& ring_buffer) {
+  auto* event_hdr = reinterpret_cast<const perf_event_header*>(record_start);
+  size_t sample_size = event_hdr->size;
+  const char* parse_pos = record_start + sizeof(perf_event_header);
+
+  uint64_t aux_offset;
+  uint64_t aux_size;
+  uint64_t flags;
+
+  ParsedSample sample = {};
+
+  parse_pos = ReadValue(&aux_offset, parse_pos);
+  parse_pos = ReadValue(&aux_size, parse_pos);
+  parse_pos = ReadValue(&flags, parse_pos);
+
+  PERFETTO_CHECK(parse_pos == record_start + sample_size);
+
+  sample.aux.resize(aux_size);
+  ring_buffer.ReadAux(sample.aux.data(), aux_size);
+
   return sample;
 }
 

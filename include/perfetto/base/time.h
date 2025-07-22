@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #ifndef INCLUDE_PERFETTO_BASE_TIME_H_
@@ -317,6 +319,24 @@ inline uint64_t Rdtsc() {
   __asm__ volatile("rdtsc" : "=a"(low), "=d"(high));
   return (high << 32) | low;
 #endif
+}
+#endif
+
+/* Multiply integer by fraction given as numerator and denominator */
+static inline uint64_t MultByFraction(uint64_t x, uint64_t numerator, uint64_t denominator) {
+
+  uint64_t __division = x / denominator;
+  uint64_t __modulo = x % denominator;
+  uint64_t __fraction = __modulo * numerator / denominator;
+  return __division * numerator + __fraction;
+}
+
+#if PERFETTO_BUILDFLAG(PERFETTO_ARCH_CPU_ARM64)
+inline uint64_t CNTVCT_ns() {
+  uint64_t count, freq;
+  asm volatile("mrs %0, cntvct_el0" : "=r" (count));
+  asm volatile("mrs %0, cntfrq_el0" : "=r" (freq));
+  return MultByFraction(count, 1000000000, freq);
 }
 #endif
 

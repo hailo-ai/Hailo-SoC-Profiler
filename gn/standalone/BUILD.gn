@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# This file has been modified by Hailo Technologies Ltd.
+#
 
 import("//gn/perfetto_check_build_deps.gni")
 import("//gn/standalone/android.gni")
@@ -116,7 +119,7 @@ config("extra_warnings") {
 
     # Use after free detection in GCC is still not good enough: it still fails
     # on very obvious false-positives in trace processor.
-    cflags_cc += [ "-Wno-use-after-free" ]
+    # cflags_cc += [ "-Wno-use-after-free" ]
 
     # GCC 7's handling of uninitialized std::optional is flaky at best and
     # causes many false positives.
@@ -128,13 +131,16 @@ config("extra_warnings") {
     # causes some false positives.
     # TODO(lalitm): remove this when we upgrade to a GCC version which is good
     # enough to handle this.
-    cflags_cc += [ "-Wno-infinite-recursion" ]
+    # cflags_cc += [ "-Wno-infinite-recursion" ]
 
     # GCC's handling of detecting non null arguments is flaky at best and
     # causes some false positives.
     # TODO(lalitm): remove this when we upgrade to a GCC version which is good
     # enough to handle this.
     cflags_cc += [ "-Wno-nonnull" ]
+
+    cflags_cc += [ "-Wno-strict-aliasing" ]
+    cflags_cc += [ "-Wno-parentheses" ]
   }
 }
 

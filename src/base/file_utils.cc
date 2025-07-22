@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #include "perfetto/ext/base/file_utils.h"
@@ -452,6 +454,74 @@ std::optional<uint64_t> GetFileSize(PlatformHandle fd) {
   static_assert(sizeof(decltype(buf.st_size)) <= sizeof(uint64_t));
   return static_cast<uint64_t>(buf.st_size);
 #endif
+}
+
+std::optional<uint64_t> GetFileValue(const std::string& path) {
+  std::string file_contents;
+  base::ScopedFile fd = base::OpenFile(path, O_RDONLY);
+  if (!fd) {
+    PERFETTO_ELOG("Failed to open %s", path.c_str());
+    return std::nullopt;
+  }
+
+  if (!base::ReadFileDescriptor(fd.get(), &file_contents)) {
+    PERFETTO_ELOG("Failed to read file");
+    return std::nullopt;
+  }
+  // usually in sysfs values contain newline in the end of the value
+  return base::StringToUInt64(base::StripSuffix(file_contents, "\n"));
+}
+
+bool SetFileValue(const std::string& path, uint64_t value) {
+  std::string value_str = std::to_string(value);
+  base::ScopedFile fd = base::OpenFile(path, O_WRONLY | O_TRUNC);
+  if (!fd) {
+    PERFETTO_ELOG("Failed to open %s", path.c_str());
+    return false;
+  }
+
+  ssize_t bytes_written = base::WriteAll(fd.get(), value_str.c_str(), value_str.size());
+  if (bytes_written < 0 || static_cast<size_t>(bytes_written) != value_str.size()) {
+    PERFETTO_ELOG("Failed to write value %s to file %s", value_str.c_str(), path.c_str());
+    return false;
+  }
+
+  return true;
+}
+
+bool SetFileValueHex(const std::string& path, uint64_t value) {
+  std::string value_str = base::Uint64ToHexString(value);
+
+  base::ScopedFile fd = base::OpenFile(path, O_WRONLY | O_TRUNC);
+  if (!fd) {
+    PERFETTO_ELOG("Failed to open %s", path.c_str());
+    return false;
+  }
+
+  ssize_t bytes_written = base::WriteAll(fd.get(), value_str.c_str(), value_str.size());
+  if (bytes_written < 0 || static_cast<size_t>(bytes_written) != value_str.size()) {
+    PERFETTO_ELOG("Failed to write value %s to file %s", value_str.c_str(), path.c_str());
+    return false;
+  }
+
+  return true;
+}
+
+
+bool SetFileContent(const std::string& path, const std::string& content) {
+  base::ScopedFile fd = base::OpenFile(path, O_WRONLY | O_TRUNC);
+  if (!fd) {
+    PERFETTO_ELOG("Failed to open %s", path.c_str());
+    return false;
+  }
+
+  ssize_t bytes_written = base::WriteAll(fd.get(), content.c_str(), content.size());
+  if (bytes_written < 0 || static_cast<size_t>(bytes_written) != content.size()) {
+    PERFETTO_ELOG("Failed to write content to file %s", path.c_str());
+    return false;
+  }
+
+  return true;
 }
 
 }  // namespace base

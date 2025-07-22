@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# This file has been modified by Hailo Technologies Ltd.
+#
 
 import("perfetto.gni")
 import("perfetto_python.gni")
@@ -97,6 +100,7 @@ action("gen_buildflags") {
     "PERFETTO_LOCAL_SYMBOLIZER=$perfetto_local_symbolizer",
     "PERFETTO_ZLIB=$enable_perfetto_zlib",
     "PERFETTO_TRACED_PERF=$enable_perfetto_traced_perf",
+    "PERFETTO_TRACED_PERF_UNWIND=$enable_perfetto_traced_perf_unwind",
     "PERFETTO_HEAPPROFD=$enable_perfetto_heapprofd",
     "PERFETTO_STDERR_CRASH_DUMP=$enable_perfetto_stderr_crash_dump",
     "PERFETTO_X64_CPU_OPT=$enable_perfetto_x64_cpu_opt",
@@ -412,7 +416,7 @@ if (enable_perfetto_trace_processor_linenoise) {
 }  # if (enable_perfetto_trace_processor_linenoise)
 
 # Only used by src/profiling in standalone and android builds.
-if (enable_perfetto_heapprofd || enable_perfetto_traced_perf) {
+if (enable_libunwindstack) {
   group("libunwindstack") {
     public_configs = [ "//buildtools:libunwindstack_config" ]
     public_deps = [ "//buildtools:libunwindstack" ]

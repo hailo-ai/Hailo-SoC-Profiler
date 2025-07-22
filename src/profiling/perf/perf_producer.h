@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #ifndef SRC_PROFILING_PERF_PERF_PRODUCER_H_
@@ -22,6 +24,13 @@
 #include <memory>
 #include <optional>
 
+#include "perfetto/base/build_config.h"
+
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
+#include <unwindstack/Error.h>
+#include <unwindstack/Regs.h>
+#endif
+
 #include "perfetto/base/task_runner.h"
 #include "perfetto/ext/base/scoped_file.h"
 #include "perfetto/ext/base/unix_socket.h"
@@ -30,13 +39,18 @@
 #include "perfetto/ext/tracing/core/producer.h"
 #include "perfetto/ext/tracing/core/trace_writer.h"
 #include "perfetto/ext/tracing/core/tracing_service.h"
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
 #include "src/profiling/common/callstack_trie.h"
 #include "src/profiling/common/interning_output.h"
+#include "src/profiling/common/unwind_support.h"
+#endif
 #include "src/profiling/perf/common_types.h"
 #include "src/profiling/perf/event_config.h"
 #include "src/profiling/perf/event_reader.h"
 #include "src/profiling/perf/proc_descriptors.h"
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
 #include "src/profiling/perf/unwinding.h"
+#endif
 #include "src/tracing/service/metatrace_writer.h"
 // TODO(rsavitski): move to e.g. src/tracefs/.
 #include "src/traced/probes/ftrace/ftrace_procfs.h"
@@ -50,8 +64,12 @@ namespace profiling {
 // samples. This class handles stages (1) and (3) on the main thread. Unwinding
 // is done by |Unwinder| on a dedicated thread.
 class PerfProducer : public Producer,
-                     public ProcDescriptorDelegate,
-                     public Unwinder::Delegate {
+                     public ProcDescriptorDelegate
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
+    ,
+                     public Unwinder::Delegate
+#endif
+{
  public:
   PerfProducer(ProcDescriptorGetter* proc_fd_getter,
                base::TaskRunner* task_runner);
@@ -85,12 +103,14 @@ class PerfProducer : public Producer,
                          base::ScopedFile maps_fd,
                          base::ScopedFile mem_fd) override;
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
   // Unwinder::Delegate impl (callbacks from unwinder):
   void PostEmitSample(DataSourceInstanceID ds_id,
                       CompletedSample sample) override;
   void PostEmitUnwinderSkippedSample(DataSourceInstanceID ds_id,
                                      ParsedSample sample) override;
   void PostFinishDataSourceStop(DataSourceInstanceID ds_id) override;
+#endif
 
   // Calls `cb` when all data sources have been registered.
   void SetAllDataSourcesRegisteredCb(std::function<void()> cb) {
@@ -154,8 +174,10 @@ class PerfProducer : public Producer,
     std::unique_ptr<TraceWriter> trace_writer;
     // Indexed by cpu, vector never resized.
     std::vector<EventReader> per_cpu_readers;
+#if PERFETTO_BUILDFLAG(PERFETTO_ANDROID_BUILD)
     // Tracks the incremental state for interned entries.
     InterningOutputTracker interning_output;
+#endif
     // Producer thread's view of sampled processes. This is the primary tracking
     // structure, but a subset of updates are replicated to a similar structure
     // in the |Unwinder|, which needs to track whether the necessary unwinding
@@ -207,6 +229,7 @@ class PerfProducer : public Producer,
   void EmitCounterOnlySample(DataSourceState& ds,
                              const CommonSampleData& sample,
                              bool has_process_context);
+  void EmitAuxSample(DataSourceState& ds, std::vector<char> aux);
   void EmitSample(DataSourceInstanceID ds_id, CompletedSample sample);
   void EmitRingBufferLoss(DataSourceInstanceID ds_id,
                           size_t cpu,
@@ -265,6 +288,7 @@ class PerfProducer : public Producer,
   // only the first one becomes active.
   std::map<DataSourceInstanceID, MetatraceWriter> metatrace_writers_;
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
   // Interns callstacks across all data sources.
   // TODO(rsavitski): for long profiling sessions, consider purging trie when it
   // grows too large (at the moment purged only when no sources are active).
@@ -274,12 +298,15 @@ class PerfProducer : public Producer,
   // emitting incremental sequence invalidation packets on all relevant
   // sequences.
   GlobalCallstackTrie callstack_trie_;
+#endif
 
   // State associated with perf-sampling data sources.
   std::map<DataSourceInstanceID, DataSourceState> data_sources_;
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
   // Unwinding stage, running on a dedicated thread.
   UnwinderHandle unwinding_worker_;
+#endif
 
   // Used for tracepoint name -> id lookups. Initialized lazily, and in general
   // best effort - can be null if tracefs isn't accessible.

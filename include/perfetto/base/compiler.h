@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #ifndef INCLUDE_PERFETTO_BASE_COMPILER_H_
@@ -139,6 +141,7 @@ extern "C" void __asan_unpoison_memory_region(void const volatile*, size_t);
 #define PERFETTO_HAS_BUILTIN_STACK_ADDRESS() 0
 #endif
 
+#define PERFETTO_PACKED __attribute__((packed))
 namespace perfetto::base {
 
 template <typename... T>

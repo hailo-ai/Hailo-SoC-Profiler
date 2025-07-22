@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# This file has been modified by Hailo Technologies Ltd.
+#
 
 import("../../../gn/fuzzer.gni")
 import("../../../gn/perfetto.gni")
@@ -44,8 +47,6 @@ source_set("traced_perf_main") {
 source_set("producer") {
   public_deps = [
     ":common_types",
-    ":regs_parsing",
-    ":unwinding",
     "../../../include/perfetto/tracing/core",
     "../../../src/tracing/service",  # for metatrace
   ]
@@ -62,9 +63,6 @@ source_set("producer") {
     "../../../src/base:unix_socket",
     "../../../src/traced/probes/ftrace:ftrace_procfs",
     "../../../src/tracing/ipc/producer",
-    "../common:callstack_trie",
-    "../common:interner",
-    "../common:interning_output",
     "../common:proc_cmdline",
     "../common:producer_support",
     "../common:profiler_guardrails",
@@ -74,55 +72,70 @@ source_set("producer") {
     "event_config.h",
     "event_reader.cc",
     "event_reader.h",
+    "hailo_noc.cc",
+    "hailo_noc.h",
     "perf_producer.cc",
     "perf_producer.h",
   ]
+  if (enable_perfetto_traced_perf_unwind) {
+    public_deps += [
+      ":regs_parsing",
+      ":unwinding",
+    ]
+    deps += [
+      "../common:callstack_trie",
+      "../common:interner",
+      "../common:interning_output",
+    ]
+  }
 }
 
 source_set("common_types") {
-  public_deps = [ "../../../gn:libunwindstack" ]
-  deps = [
-    "../../../gn:default_deps",
-    "../common:unwind_support",
-  ]
+  public_deps = []
+  deps = [ "../../../gn:default_deps" ]
   sources = [ "common_types.h" ]
+  if (enable_perfetto_traced_perf_unwind) {
+    public_deps += [ "../../../gn:libunwindstack" ]
+    deps += [ "../common:unwind_support" ]
+  }
 }
 
-source_set("unwinding") {
-  public_deps = [
-    "../../../gn:libunwindstack",
-    "../../../src/tracing/service",  # for metatrace
-  ]
-  deps = [
-    ":common_types",
-    "../../../gn:default_deps",
-    "../../../include/perfetto/ext/tracing/core",
-    "../../../src/base",
-    "../../../src/kallsyms",
-    "../common:unwind_support",
-  ]
-  sources = [
-    "frame_pointer_unwinder.cc",
-    "frame_pointer_unwinder.h",
-    "unwind_queue.h",
-    "unwinding.cc",
-    "unwinding.h",
-  ]
-}
+if (enable_perfetto_traced_perf_unwind) {
+  source_set("unwinding") {
+    public_deps = [
+      "../../../gn:libunwindstack",
+      "../../../src/tracing/service",  # for metatrace
+    ]
+    deps = [
+      ":common_types",
+      "../../../gn:default_deps",
+      "../../../include/perfetto/ext/tracing/core",
+      "../../../src/base",
+      "../../../src/kallsyms",
+      "../common:unwind_support",
+    ]
+    sources = [
+      "frame_pointer_unwinder.cc",
+      "frame_pointer_unwinder.h",
+      "unwind_queue.h",
+      "unwinding.cc",
+      "unwinding.h",
+    ]
+  }
 
-source_set("regs_parsing") {
-  public_deps = [ "../../../gn:libunwindstack" ]
-  deps = [
-    "../../../gn:bionic_kernel_uapi_headers",
-    "../../../gn:default_deps",
-    "../../../src/base",
-  ]
-  sources = [
-    "regs_parsing.cc",
-    "regs_parsing.h",
-  ]
+  source_set("regs_parsing") {
+    public_deps = [ "../../../gn:libunwindstack" ]
+    deps = [
+      "../../../gn:bionic_kernel_uapi_headers",
+      "../../../gn:default_deps",
+      "../../../src/base",
+    ]
+    sources = [
+      "regs_parsing.cc",
+      "regs_parsing.h",
+    ]
+  }
 }
-
 source_set("proc_descriptors") {
   deps = [
     "../../../gn:default_deps",
@@ -138,7 +151,6 @@ source_set("producer_unittests") {
   testonly = true
   deps = [
     ":producer",
-    ":unwinding",
     "../../../gn:default_deps",
     "../../../gn:gtest_and_gmock",
     "../../../protos/perfetto/common:cpp",
@@ -154,4 +166,7 @@ source_set("producer_unittests") {
     "perf_producer_unittest.cc",
     "unwind_queue_unittest.cc",
   ]
+  if (enable_perfetto_traced_perf_unwind) {
+    deps += [ ":unwinding" ]
+  }
 }

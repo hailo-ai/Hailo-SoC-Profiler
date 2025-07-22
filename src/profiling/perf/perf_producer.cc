@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #include "src/profiling/perf/perf_producer.h"
@@ -23,11 +25,15 @@
 
 #include <unistd.h>
 
+#include "perfetto/base/build_config.h"
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
 #include <unwindstack/Error.h>
 #include <unwindstack/Unwinder.h>
+#endif
 
 #include "perfetto/base/logging.h"
 #include "perfetto/base/task_runner.h"
+#include "perfetto/base/hailo.h"
 #include "perfetto/ext/base/file_utils.h"
 #include "perfetto/ext/base/metatrace.h"
 #include "perfetto/ext/base/string_utils.h"
@@ -39,13 +45,16 @@
 #include "perfetto/public/compiler.h"
 #include "perfetto/tracing/core/data_source_config.h"
 #include "perfetto/tracing/core/data_source_descriptor.h"
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
 #include "src/profiling/common/callstack_trie.h"
+#endif
 #include "src/profiling/common/proc_cmdline.h"
 #include "src/profiling/common/producer_support.h"
 #include "src/profiling/common/profiler_guardrails.h"
 #include "src/profiling/perf/common_types.h"
 #include "src/profiling/perf/event_config.h"
 #include "src/profiling/perf/event_reader.h"
+#include "src/profiling/perf/hailo_noc.h"
 
 #include "protos/perfetto/common/builtin_clock.pbzero.h"
 #include "protos/perfetto/common/perf_events.pbzero.h"
@@ -150,8 +159,13 @@ void WritePerfEventDefaultsPacket(const EventConfig& event_config,
   perf_event_attr* perf_attr = event_config.perf_attr();
   auto* defaults = packet->set_trace_packet_defaults();
 
+  // timebase event:
+  const PerfCounter& timebase = event_config.timebase_event();
+
   bool polling_mode = event_config.recording_mode() == RecordingMode::kPolling;
-  if (polling_mode) {
+  if (timebase.event_type() == PerfCounter::Type::kHailoNocEvent) {
+    defaults->set_timestamp_clock_id(base::GetScuClockId());
+  } else if (polling_mode) {
     // In polling mode, we snapshot the counters ourselves, always using
     // BOOTTIME as that's the typical default for perfetto tracing.
     defaults->set_timestamp_clock_id(protos::pbzero::BUILTIN_CLOCK_BOOTTIME);
@@ -172,8 +186,6 @@ void WritePerfEventDefaultsPacket(const EventConfig& event_config,
     timebase_pb->set_period(perf_attr->sample_period);
   }
 
-  // timebase event:
-  const PerfCounter& timebase = event_config.timebase_event();
   switch (timebase.event_type()) {
     case PerfCounter::Type::kBuiltinCounter: {
       timebase_pb->set_counter(
@@ -192,6 +204,15 @@ void WritePerfEventDefaultsPacket(const EventConfig& event_config,
       raw_pb->set_config(timebase.attr_config);
       raw_pb->set_config1(timebase.attr_config1);
       raw_pb->set_config2(timebase.attr_config2);
+      break;
+    }
+    case PerfCounter::Type::kHailoNocEvent: {
+      timebase_pb->set_hailo_noc_event();
+      break;
+    }
+    case PerfCounter::Type::kHailoNocCounter: {
+      PERFETTO_FATAL(
+          "HailoNocCounter should only be used as a follower event.");
       break;
     }
   }
@@ -224,6 +245,18 @@ void WritePerfEventDefaultsPacket(const EventConfig& event_config,
         raw_pb->set_config(e.attr_config);
         raw_pb->set_config1(e.attr_config1);
         raw_pb->set_config2(e.attr_config2);
+        break;
+      }
+      case PerfCounter::Type::kHailoNocCounter: {
+        followers_pb->set_hailo_noc_counter();
+        followers_pb->set_unit_name("Gb/s");
+        PERFETTO_CHECK(timebase.event_type() == PerfCounter::Type::kHailoNocEvent);
+        followers_pb->set_multiplier(8.0 / timebase.sample_time_us / 1000);
+        break;
+      }
+      case PerfCounter::Type::kHailoNocEvent: {
+        PERFETTO_FATAL(
+            "HailoNocEvent should only be used as a timebase event.");
         break;
       }
     }
@@ -274,6 +307,7 @@ protos::pbzero::Profiling::CpuMode ToCpuModeEnum(uint16_t perf_cpu_mode) {
   }
 }
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
 protos::pbzero::Profiling::StackUnwindError ToProtoEnum(
     unwindstack::ErrorCode error_code) {
   using Profiling = protos::pbzero::Profiling;
@@ -311,6 +345,7 @@ protos::pbzero::Profiling::StackUnwindError ToProtoEnum(
   }
   return Profiling::UNWIND_ERROR_UNKNOWN;
 }
+#endif
 
 }  // namespace
 
@@ -406,7 +441,9 @@ PerfProducer::PerfProducer(ProcDescriptorGetter* proc_fd_getter,
                            base::TaskRunner* task_runner)
     : task_runner_(task_runner),
       proc_fd_getter_(proc_fd_getter),
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
       unwinding_worker_(this),
+#endif
       weak_factory_(this) {
   proc_fd_getter->SetDelegate(this);
 }
@@ -481,6 +518,12 @@ void PerfProducer::StartDataSource(DataSourceInstanceID ds_id,
       return;
     }
     per_cpu_readers.emplace_back(std::move(event_reader.value()));
+
+    // NoC events are recorded by HW so only a single reader is needed.
+    if (event_config.value().timebase_event().type ==
+        PerfCounter::Type::kHailoNocEvent) {
+      break;
+    }
   }
 
   auto buffer_id = static_cast<BufferID>(config.target_buffer());
@@ -520,6 +563,7 @@ void PerfProducer::StartDataSource(DataSourceInstanceID ds_id,
 
   // Additional setup for sampling mode.
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
   InterningOutputTracker::WriteFixedInterningsPacket(
       ds_it->second.trace_writer.get(),
       protos::pbzero::TracePacket::SEQ_NEEDS_INCREMENTAL_STATE);
@@ -536,6 +580,7 @@ void PerfProducer::StartDataSource(DataSourceInstanceID ds_id,
     unwinding_worker_->PostClearCachedStatePeriodic(
         ds_id, ds.event_config.unwind_state_clear_period_ms());
   }
+#endif
 
   // Optionally kick off periodic memory footprint limit check.
   uint32_t max_daemon_memory_kb = event_config_pb.max_daemon_memory_kb();
@@ -606,6 +651,12 @@ void PerfProducer::StopDataSource(DataSourceInstanceID ds_id) {
     // propagate the stop further as the intermediate buffers are cleared.
     InitiateReaderStop(&ds);
   }
+
+  // The unwinder will finish the data source if it is enabled.
+  // Otherwise, we need to finish it ourselves.
+#if !PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
+  FinishDataSourceStop(ds_id);
+#endif
 }
 
 // The perf data sources ignore flush requests, as flushing would be
@@ -651,6 +702,7 @@ void PerfProducer::ClearIncrementalState(
 
     WritePerfEventDefaultsPacket(ds.event_config, ds.trace_writer.get());
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
     // Forget which incremental state we've emitted before.
     ds.interning_output.ClearHistory();
     InterningOutputTracker::WriteFixedInterningsPacket(
@@ -666,6 +718,7 @@ void PerfProducer::ClearIncrementalState(
     // bother with clearing concurrent sources' interning output trackers as
     // their footprint should be trivial.
     callstack_trie_.ClearTrie();
+#endif
   }
 }
 
@@ -719,12 +772,15 @@ bool PerfProducer::ReadRingBuffers(DataSourceInstanceID ds_id,
     }
   }
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
   // Wake up the unwinder as we've (likely) pushed samples into its queue.
   unwinding_worker_->PostProcessQueue();
-
+#endif
   if (PERFETTO_UNLIKELY(ds.status == DataSourceState::Status::kShuttingDown) &&
       !more_records_available) {
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
     unwinding_worker_->PostInitiateDataSourceStop(ds_id);
+#endif
     return false;  // stop reposting the read callback
   }
   return true;  // continue reading
@@ -757,7 +813,11 @@ bool PerfProducer::ReadAndParsePerCpuBuffer(EventReader* reader,
     // immediately.
     const EventConfig& event_config = ds.event_config;
     if (!event_config.sample_callstacks()) {
-      EmitCounterOnlySample(ds, sample->common, /*has_process_context=*/true);
+      if (!sample->aux.size()) {
+        EmitCounterOnlySample(ds, sample->common, /*has_process_context=*/true);
+      } else {
+        EmitAuxSample(ds, std::move(sample->aux));
+      }
       continue;
     }
 
@@ -796,6 +856,7 @@ bool PerfProducer::ReadAndParsePerCpuBuffer(EventReader* reader,
     if (process_state == ProcessTrackingStatus::kInitial) {
       PERFETTO_DLOG("New pid: [%d]", static_cast<int>(pid));
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
       // Kernel threads (which have no userspace state) are never relevant if
       // we're not recording kernel callchains.
       bool is_kthread = !sample->regs;  // no userspace regs
@@ -830,11 +891,13 @@ bool PerfProducer::ReadAndParsePerCpuBuffer(EventReader* reader,
         unwinding_worker_->PostRecordNoUserspaceProcess(ds_id, pid);
         // note: fallthrough
       }
+#endif
     }
 
     PERFETTO_CHECK(process_state == ProcessTrackingStatus::kAccepted ||
                    process_state == ProcessTrackingStatus::kFdsResolving);
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
     // If we're only interested in the kernel callchains, then userspace
     // process samples are relevant only if they were sampled during kernel
     // context.
@@ -871,6 +934,7 @@ bool PerfProducer::ReadAndParsePerCpuBuffer(EventReader* reader,
       EmitSkippedSample(ds_id, std::move(sample.value()),
                         SampleSkipReason::kUnwindEnqueue);
     }
+#endif
   }  // for (i < max_samples)
 
   // Most likely more events in the kernel buffer. Though we might be exactly on
@@ -911,8 +975,13 @@ void PerfProducer::OnProcDescriptors(pid_t pid,
                     static_cast<int>(pid), static_cast<size_t>(it.first));
 
       proc_status_it->second = ProcessTrackingStatus::kAccepted;
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
       unwinding_worker_->PostAdoptProcDescriptors(
           it.first, pid, std::move(maps_fd), std::move(mem_fd));
+#else
+      (void)maps_fd;
+      (void)mem_fd;
+#endif
       return;  // done
     }
   }
@@ -972,9 +1041,11 @@ void PerfProducer::EvaluateDescriptorLookupTimeout(DataSourceInstanceID ds_id,
                   static_cast<int>(pid), static_cast<size_t>(ds_it->first));
 
     proc_status_it->second = ProcessTrackingStatus::kFdsTimedOut;
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
     // Also inform the unwinder of the state change (so that it can discard any
     // of the already-enqueued samples).
     unwinding_worker_->PostRecordTimedOutProcDescriptors(ds_id, pid);
+#endif
   }
 }
 
@@ -998,6 +1069,7 @@ void PerfProducer::EmitCounterOnlySample(DataSourceState& ds,
   }
 }
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
 void PerfProducer::PostEmitSample(DataSourceInstanceID ds_id,
                                   CompletedSample sample) {
   // hack: c++11 lambdas can't be moved into, so stash the sample on the heap.
@@ -1008,6 +1080,21 @@ void PerfProducer::PostEmitSample(DataSourceInstanceID ds_id,
       weak_this->EmitSample(ds_id, std::move(*raw_sample));
     delete raw_sample;
   });
+}
+#endif
+
+void PerfProducer::EmitAuxSample(DataSourceState& ds, std::vector<char> aux) {
+  switch (ds.event_config.timebase_event().event_type()) {
+    case PerfCounter::Type::kHailoNocEvent: {
+      EmitHailoNocAuxSample(ds.trace_writer.get(), ds.event_config,
+                            std::move(aux));
+      break;
+    }
+    default: {
+      PERFETTO_FATAL("Event type does not support Aux samples");
+      break;
+    }
+  }
 }
 
 void PerfProducer::EmitSample(DataSourceInstanceID ds_id,
@@ -1020,19 +1107,23 @@ void PerfProducer::EmitSample(DataSourceInstanceID ds_id,
   }
   DataSourceState& ds = ds_it->second;
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
   // intern callsite
   GlobalCallstackTrie::Node* callstack_root =
       callstack_trie_.CreateCallsite(sample.frames, sample.build_ids);
   uint64_t callstack_iid = callstack_root->id();
+#endif
 
   // start packet, timestamp domain defaults to monotonic_raw
   auto packet = StartTracePacket(ds.trace_writer.get());
   packet->set_timestamp(sample.common.timestamp);
 
   // write new interning data (if any)
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
   protos::pbzero::InternedData* interned_out = packet->set_interned_data();
   ds.interning_output.WriteCallstack(callstack_root, &callstack_trie_,
                                      interned_out);
+#endif
 
   // write the sample itself
   auto* perf_sample = packet->set_perf_sample();
@@ -1045,10 +1136,12 @@ void PerfProducer::EmitSample(DataSourceInstanceID ds_id,
     perf_sample->add_follower_counts(follower_count);
   }
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
   perf_sample->set_callstack_iid(callstack_iid);
   if (sample.unwind_error != unwindstack::ERROR_NONE) {
     perf_sample->set_unwind_error(ToProtoEnum(sample.unwind_error));
   }
+#endif
 }
 
 void PerfProducer::EmitRingBufferLoss(DataSourceInstanceID ds_id,
@@ -1077,11 +1170,13 @@ void PerfProducer::EmitRingBufferLoss(DataSourceInstanceID ds_id,
   perf_sample->set_kernel_records_lost(records_lost);
 }
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
 void PerfProducer::PostEmitUnwinderSkippedSample(DataSourceInstanceID ds_id,
                                                  ParsedSample sample) {
   PostEmitSkippedSample(ds_id, std::move(sample),
                         SampleSkipReason::kUnwindStage);
 }
+#endif
 
 void PerfProducer::PostEmitSkippedSample(DataSourceInstanceID ds_id,
                                          ParsedSample sample,
@@ -1145,6 +1240,7 @@ void PerfProducer::InitiateReaderStop(DataSourceState* ds) {
   }
 }
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
 void PerfProducer::PostFinishDataSourceStop(DataSourceInstanceID ds_id) {
   auto weak_producer = weak_factory_.GetWeakPtr();
   task_runner_->PostTask([weak_producer, ds_id] {
@@ -1152,6 +1248,7 @@ void PerfProducer::PostFinishDataSourceStop(DataSourceInstanceID ds_id) {
       weak_producer->FinishDataSourceStop(ds_id);
   });
 }
+#endif
 
 void PerfProducer::FinishDataSourceStop(DataSourceInstanceID ds_id) {
   PERFETTO_LOG("FinishDataSourceStop(%zu)", static_cast<size_t>(ds_id));
@@ -1171,7 +1268,9 @@ void PerfProducer::FinishDataSourceStop(DataSourceInstanceID ds_id) {
 
   // Clean up resources if there are no more active sources.
   if (data_sources_.empty()) {
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
     callstack_trie_.ClearTrie();  // purge internings
+#endif
     base::MaybeReleaseAllocatorMemToOS();
   }
 }
@@ -1194,7 +1293,9 @@ void PerfProducer::PurgeDataSource(DataSourceInstanceID ds_id) {
   PERFETTO_LOG("Stopping DataSource(%zu) prematurely",
                static_cast<size_t>(ds_id));
 
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
   unwinding_worker_->PostPurgeDataSource(ds_id);
+#endif
 
   // Write a packet indicating the abrupt stop.
   {
@@ -1213,7 +1314,9 @@ void PerfProducer::PurgeDataSource(DataSourceInstanceID ds_id) {
 
   // Clean up resources if there are no more active sources.
   if (data_sources_.empty()) {
+#if PERFETTO_BUILDFLAG(PERFETTO_TRACED_PERF_UNWIND)
     callstack_trie_.ClearTrie();  // purge internings
+#endif
     base::MaybeReleaseAllocatorMemToOS();
   }
 }

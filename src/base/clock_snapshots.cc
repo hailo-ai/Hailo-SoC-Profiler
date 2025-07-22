@@ -12,12 +12,16 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #include "perfetto/ext/base/clock_snapshots.h"
 
 #include "perfetto/base/build_config.h"
+#include "perfetto/base/hailo.h"
 #include "perfetto/base/time.h"
+
 #include "protos/perfetto/common/builtin_clock.pbzero.h"
 
 namespace perfetto::base {
@@ -46,6 +50,13 @@ ClockSnapshotVector CaptureClockSnapshots() {
        protos::pbzero::BUILTIN_CLOCK_MONOTONIC_RAW,
        {0, 0}},
   };
+#if PERFETTO_BUILDFLAG(PERFETTO_ARCH_CPU_ARM64)
+  // read the SCU timer offset before timestamps are read
+  // since it might take time and so we want to read it
+  // before reading the timestamps which should be done as fast as possible
+  uint64_t scu_timer_offset = GetScuTimerOffset();
+#endif  // PERFETTO_BUILDFLAG(PERFETTO_ARCH_CPU_ARM64)
+
   // First snapshot all the clocks as atomically as we can.
   for (auto& clock : clocks) {
     if (clock_gettime(clock.id, &clock.ts) == -1)
@@ -72,8 +83,17 @@ ClockSnapshotVector CaptureClockSnapshots() {
   snapshot_data.push_back(
       ClockReading(protos::pbzero::BUILTIN_CLOCK_TSC, base::Rdtsc()));
 #endif  // PERFETTO_BUILDFLAG(PERFETTO_ARCH_CPU_X86_64)
+#if PERFETTO_BUILDFLAG(PERFETTO_ARCH_CPU_ARM64)
+  // ARM64-specific but OS-independent CNVCT clocksource
+  uint64_t cntvct_ns = base::CNTVCT_ns();
+  snapshot_data.push_back(
+      ClockReading(protos::pbzero::BUILTIN_CLOCK_TSC, cntvct_ns));
+  snapshot_data.push_back(
+      ClockReading(GetScuClockId(), cntvct_ns + scu_timer_offset));
+
+#endif  // PERFETTO_BUILDFLAG(PERFETTO_ARCH_CPU_ARM64)
 
   return snapshot_data;
 }
 
-}  // namespace perfetto
+}  // namespace perfetto::base

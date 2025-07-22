@@ -11,57 +11,62 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# This file has been modified by Hailo Technologies Ltd.
+#
 
 import("../../../gn/perfetto.gni")
 import("../../../gn/test.gni")
 
-source_set("unwind_support") {
-  public_deps = [ "../../../gn:libunwindstack" ]
-  deps = [
-    "../../../gn:default_deps",
-    "../../../src/base",
-  ]
-  sources = [
-    "unwind_support.cc",
-    "unwind_support.h",
-  ]
-}
+if (enable_libunwindstack) {
+  source_set("unwind_support") {
+    public_deps = [ "../../../gn:libunwindstack" ]
+    deps = [
+      "../../../gn:default_deps",
+      "../../../src/base",
+    ]
+    sources = [
+      "unwind_support.cc",
+      "unwind_support.h",
+    ]
+  }
 
-source_set("callstack_trie") {
-  public_deps = [ ":unwind_support" ]
-  deps = [
-    ":interner",
-    "../../../gn:default_deps",
-    "../../../src/base",
-  ]
-  sources = [
-    "callstack_trie.cc",
-    "callstack_trie.h",
-  ]
-}
+  source_set("callstack_trie") {
+    public_deps = [ ":unwind_support" ]
+    deps = [
+      ":interner",
+      "../../../gn:default_deps",
+      "../../../src/base",
+    ]
+    sources = [
+      "callstack_trie.cc",
+      "callstack_trie.h",
+    ]
+  }
 
-source_set("interner") {
-  deps = [
-    "../../../gn:default_deps",
-    "../../../src/base",
-  ]
-  sources = [ "interner.h" ]
-}
+  source_set("interner") {
+    deps = [
+      "../../../gn:default_deps",
+      "../../../src/base",
+    ]
+    sources = [ "interner.h" ]
+  }
 
-source_set("interning_output") {
-  deps = [
-    ":callstack_trie",
-    ":interner",
-    "../../../gn:default_deps",
-    "../../../include/perfetto/ext/tracing/core",
-    "../../../protos/perfetto/trace:zero",
-    "../../../protos/perfetto/trace/interned_data:zero",
-    "../../../protos/perfetto/trace/profiling:zero",
-  ]
-  sources = [
-    "interning_output.cc",
-    "interning_output.h",
-  ]
+  source_set("interning_output") {
+    deps = [
+      ":callstack_trie",
+      ":interner",
+      "../../../gn:default_deps",
+      "../../../include/perfetto/ext/tracing/core",
+      "../../../protos/perfetto/trace:zero",
+      "../../../protos/perfetto/trace/interned_data:zero",
+      "../../../protos/perfetto/trace/profiling:zero",
+    ]
+    sources = [
+      "interning_output.cc",
+      "interning_output.h",
+    ]
+  }
 }
 
 source_set("proc_utils") {
@@ -116,7 +121,6 @@ source_set("profiler_guardrails") {
 perfetto_unittest_source_set("unittests") {
   testonly = true
   deps = [
-    ":interner",
     ":proc_cmdline",
     ":proc_utils",
     ":producer_support",
@@ -128,10 +132,14 @@ perfetto_unittest_source_set("unittests") {
     "../../tracing/core",
   ]
   sources = [
-    "interner_unittest.cc",
     "proc_cmdline_unittest.cc",
     "proc_utils_unittest.cc",
     "producer_support_unittest.cc",
     "profiler_guardrails_unittest.cc",
   ]
+
+  if (enable_libunwindstack) {
+    deps += [ ":interner" ]
+    sources += [ "interner_unittest.cc" ]
+  }
 }

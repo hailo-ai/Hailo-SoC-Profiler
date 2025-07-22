@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #ifndef SRC_PROFILING_PERF_EVENT_READER_H_
@@ -30,10 +32,18 @@
 namespace perfetto {
 namespace profiling {
 
+struct PerfRingControl {
+  __u64 head;
+  __u64 tail;
+  __u64 offset;
+  __u64 size;
+};
+
 class PerfRingBuffer {
  public:
   static std::optional<PerfRingBuffer> Allocate(int perf_fd,
-                                                size_t data_page_count);
+                                                size_t data_page_count,
+                                                size_t aux_page_count);
 
   ~PerfRingBuffer();
 
@@ -43,16 +53,28 @@ class PerfRingBuffer {
   PerfRingBuffer(PerfRingBuffer&& other) noexcept;
   PerfRingBuffer& operator=(PerfRingBuffer&& other) noexcept;
 
-  char* ReadRecordNonconsuming();
+  char* ReadRecordNonconsuming(uint32_t size = 0);
   void Consume(size_t bytes);
+  void ReadAux(char* buffer, uint32_t size);
 
  private:
   PerfRingBuffer() = default;
 
-  bool valid() const { return metadata_page_ != nullptr; }
+  bool valid() const { return mmap_addr_ != nullptr; }
+
+  static std::optional<PerfRingBuffer> AllocateAux(
+      int perf_fd,
+      PerfRingBuffer& data_ring_buffer,
+      size_t aux_page_count);
 
   // Points at the start of the mmap'd region.
   perf_event_mmap_page* metadata_page_ = nullptr;
+
+  PerfRingControl* control_ = nullptr;
+
+  std::unique_ptr<PerfRingBuffer> aux_ring_buffer_;  // optional
+
+  void* mmap_addr_ = nullptr;
 
   // Size of the mmap'd region (1 metadata page + data_buf_sz_).
   size_t mmap_sz_ = 0;
@@ -60,6 +82,8 @@ class PerfRingBuffer {
   // mmap'd ring buffer
   char* data_buf_ = nullptr;
   size_t data_buf_sz_ = 0;
+
+  bool is_aux_ = false;
 
   // When a record wraps around the ring buffer boundary, it is reconstructed in
   // a contiguous form in this buffer. This allows us to always return a pointer
@@ -110,6 +134,8 @@ class EventReader {
               std::optional<PerfRingBuffer> ring_buffer);
 
   ParsedSample ParseSampleRecord(uint32_t cpu, const char* record_start);
+  ParsedSample ParseAuxRecord(const char* record_start,
+                              PerfRingBuffer& aux_ring_buffer);
 
   // All events are cpu-bound (thread-scoped events not supported).
   const uint32_t cpu_;

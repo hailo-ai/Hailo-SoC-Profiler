@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #include "src/trace_processor/importers/proto/profile_module.h"
@@ -247,17 +249,20 @@ void ProfileModule::ParsePerfSample(
 
   // Proper sample, populate the |perf_sample| table with everything except the
   // recorded counter values, which go to |counter|.
-  context_->event_tracker->PushCounter(
-      ts, static_cast<double>(sample.timebase_count()),
-      sampling_stream.timebase_track_id);
+  if (kInvalidTrackId != sampling_stream.timebase_track_id) {
+    context_->event_tracker->PushCounter(
+        ts, static_cast<double>(sample.timebase_count()),
+        sampling_stream.timebase_track_id);
+  }
 
   if (sample.has_follower_counts()) {
     auto track_it = sampling_stream.follower_track_ids.begin();
+    auto mult_it = sampling_stream.follower_multipliers.begin();
     auto track_end = sampling_stream.follower_track_ids.end();
     for (auto it = sample.follower_counts(); it && track_it != track_end;
-         ++it, ++track_it) {
-      context_->event_tracker->PushCounter(ts, static_cast<double>(*it),
-                                           *track_it);
+         ++it, ++track_it, ++mult_it) {
+      context_->event_tracker->PushCounter(
+          ts, static_cast<double>(*it) * (*mult_it), *track_it);
     }
   }
 
