@@ -34,9 +34,23 @@ void ThreadSubTrack::Serialize(protos::pbzero::TrackDescriptor *desc) const
     desc->AppendRawProtoBytes(bytes.data(), bytes.size());
 }
 
-// TODO: currently only the media library uses libperfetto
-//       but once we have more components that use perfetto,
-//       we want to use this file to initialize tracing globally
-//       which is something that we currently do in the media library
+class HailoPerfettoInitializer
+{
+  public:
+    HailoPerfettoInitializer()
+    {
+        TracingInitArgs args;
+        args.backends = kSystemBackend;
+        Tracing::Initialize(args);
+    }
+
+    ~HailoPerfettoInitializer()
+    {
+        Tracing::Shutdown();
+    }
+};
+
+// This static instance ensures the constructor runs during libperfetto load
+static HailoPerfettoInitializer _hailo_perfetto_initializer;
 
 }  // namespace perfetto

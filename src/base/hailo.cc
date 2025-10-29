@@ -35,7 +35,7 @@ static HailoSocType ReadHailoSocType() {
         PERFETTO_FATAL("Failed to read Hailo SoC type");
     }
 
-    if (soc_type_str == "Hailo-15\n") {
+    if ((soc_type_str == "Hailo-15\n") || (soc_type_str == "Hailo-10h\n")) {
         return HailoSocType::HAILO15;
     } else if (soc_type_str == "Hailo-15l\n") {
         return HailoSocType::HAILO15L;
