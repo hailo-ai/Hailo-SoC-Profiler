@@ -11,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// This file has been modified by Hailo Technologies Ltd.
 
 import {assertExists} from '../../base/logging';
 import {PerfettoPlugin} from '../../public/plugin';
@@ -27,6 +29,7 @@ import {TraceProcessorCounterTrack} from './trace_processor_counter_track';
 import {COUNTER_TRACK_SCHEMAS} from './counter_tracks';
 import {SliceSelectionAggregator} from './slice_selection_aggregator';
 import {TraceProcessorSliceTrack} from './trace_processor_slice_track';
+import {MemoryTrackerTrackHandler} from './memory_tracker_track_handler';
 import {TopLevelTrackGroup, TrackGroupSchema} from './types';
 import {removeFalsyValues} from '../../base/array_utils';
 
@@ -36,6 +39,8 @@ export default class implements PerfettoPlugin {
     ProcessThreadGroupsPlugin,
     StandardGroupsPlugin,
   ];
+  
+  private memoryTrackerHandler = new MemoryTrackerTrackHandler();
 
   async onTraceLoad(ctx: Trace): Promise<void> {
     await this.addCounters(ctx);
@@ -90,7 +95,7 @@ export default class implements PerfettoPlugin {
           ct.id,
           ct.unit,
           extract_arg(ct.dimension_arg_set_id, 'utid') as utid,
-          extract_arg(ct.dimension_arg_set_id, 'upid') as upid
+          extract_arg(ct.dimension_arg_set_id, 'upid') as upid${MemoryTrackerTrackHandler.getCounterTrackSqlFragments()}
         from counter_track ct
         join _counter_track_summary using (id)
         order by ct.name
@@ -112,7 +117,8 @@ export default class implements PerfettoPlugin {
     `);
 
     const schemas = new Map(COUNTER_TRACK_SCHEMAS.map((x) => [x.type, x]));
-    const it = result.iter({
+    
+    const iteratorFields: Record<string, any> = {
       id: NUM,
       type: STR,
       name: STR_NULL,
@@ -125,13 +131,18 @@ export default class implements PerfettoPlugin {
       pid: NUM_NULL,
       isMainThread: NUM,
       isKernelThread: NUM,
-    });
+      ...MemoryTrackerTrackHandler.getCounterTrackIteratorFields(),
+    };
+    const it = result.iter(iteratorFields);
     for (; it.valid(); it.next()) {
       const {
         type,
         id: trackId,
         name,
         unit,
+        parentId,
+        tracker_name,
+        heap_name,
         utid,
         upid,
         threadName,
@@ -158,6 +169,31 @@ export default class implements PerfettoPlugin {
         threadTrack: utid !== undefined,
       });
       const uri = `/counter_${trackId}`;
+      
+      // Create track instance (handler may provide custom instance)
+      const customTrackInstance = this.memoryTrackerHandler.createCounterTrackInstance(
+        type,
+        ctx,
+        uri,
+        schema,
+        unit,
+        trackId,
+        title,
+        heap_name,
+      );
+      const trackInstance = customTrackInstance ?? new TraceProcessorCounterTrack(
+        ctx,
+        uri,
+        {
+          yMode: schema.mode,
+          yRangeSharingKey: schema.shareYAxis ? it.type : undefined,
+          unit: unit ?? undefined,
+        },
+        trackId,
+        title,
+      );
+      
+      // Always register tracks normally
       ctx.tracks.registerTrack({
         uri,
         title,
@@ -171,31 +207,46 @@ export default class implements PerfettoPlugin {
         chips: removeFalsyValues([
           isKernelThread === 0 && isMainThread === 1 && 'main thread',
         ]),
-        track: new TraceProcessorCounterTrack(
-          ctx,
-          uri,
-          {
-            yMode: schema.mode,
-            yRangeSharingKey: schema.shareYAxis ? it.type : undefined,
-            unit: unit ?? undefined,
-          },
-          trackId,
-          title,
-        ),
+        track: trackInstance,
       });
-      addTrack(
+      
+      const trackNode = new TrackNode({
+        uri,
+        title,
+        sortOrder: utid !== undefined || upid !== undefined ? 30 : 0,
+      });
+      
+      // Delegate MemoryTracker tracks to handler (adds to MemoryTracker hierarchy)
+      const handled = await this.memoryTrackerHandler.handleCounterTrack(
         ctx,
+        trackId,
+        type,
+        name,
+        unit,
+        parentId,
+        tracker_name,
+        heap_name,
         topLevelGroup,
         group,
-        upid,
-        utid,
-        new TrackNode({
-          uri,
-          title,
-          sortOrder: utid !== undefined || upid !== undefined ? 30 : 0,
-        }),
+        schema,
+        trackNode,
       );
+      
+      // Only add to normal location if not handled by MemoryTracker handler
+      if (!handled) {
+        addTrack(
+          ctx,
+          topLevelGroup,
+          group,
+          upid,
+          utid,
+          trackNode,
+        );
+      }
     }
+    
+    // Second pass: process any pending children that were waiting for their parents
+    this.memoryTrackerHandler.processPendingCounterChildren();
   }
 
   private async addSlices(ctx: Trace) {
@@ -207,16 +258,19 @@ export default class implements PerfettoPlugin {
           t.type,
           t.name,
           extract_arg(t.dimension_arg_set_id, 'utid') as utid,
-          extract_arg(t.dimension_arg_set_id, 'upid') as upid,
+          extract_arg(t.dimension_arg_set_id, 'upid') as upid${MemoryTrackerTrackHandler.getSliceTrackSqlFragments()},
           group_concat(t.id) as trackIds,
           count() as trackCount
         from _slice_track_summary s
         join track t using (id)
-        group by type, upid, utid, name
+        group by type, upid, utid, name${MemoryTrackerTrackHandler.getSliceTrackGroupBy()}
       )
       select
         s.type,
         s.name,
+        s.tracker_name,
+        s.heap_name,
+        s.parentId,
         s.utid,
         ifnull(s.upid, tp.upid) as upid,
         s.trackIds as trackIds,
@@ -236,7 +290,8 @@ export default class implements PerfettoPlugin {
     `);
 
     const schemas = new Map(SLICE_TRACK_SCHEMAS.map((x) => [x.type, x]));
-    const it = result.iter({
+    
+    const iteratorFields: Record<string, any> = {
       type: STR,
       name: STR_NULL,
       utid: NUM_NULL,
@@ -249,12 +304,18 @@ export default class implements PerfettoPlugin {
       processName: STR_NULL,
       isMainThread: NUM,
       isKernelThread: NUM,
-    });
+      ...MemoryTrackerTrackHandler.getSliceTrackIteratorFields(),
+    };
+    const it = result.iter(iteratorFields);
+    
     for (; it.valid(); it.next()) {
       const {
         trackIds: rawTrackIds,
         type,
         name,
+        tracker_name,
+        heap_name,
+        parentId,
         maxDepth,
         utid,
         upid,
@@ -269,7 +330,7 @@ export default class implements PerfettoPlugin {
       if (schema === undefined) {
         continue;
       }
-      const trackIds = rawTrackIds.split(',').map((v) => Number(v));
+      const trackIds = rawTrackIds.split(',').map((v: string) => Number(v));
       const {group, topLevelGroup} = schema;
       const title = getTrackName({
         name,
@@ -283,6 +344,18 @@ export default class implements PerfettoPlugin {
         threadTrack: utid !== undefined,
       });
       const uri = `/slice_${trackIds[0]}`;
+      
+      // Create track instance (handler may provide custom instance)
+      const customTrackInstance = this.memoryTrackerHandler.createSliceTrackInstance(
+        type,
+        ctx,
+        uri,
+        maxDepth,
+        trackIds,
+      );
+      const trackInstance = customTrackInstance ?? new TraceProcessorSliceTrack(ctx, uri, maxDepth, trackIds);
+      
+      // Always register tracks normally
       ctx.tracks.registerTrack({
         uri,
         title,
@@ -296,20 +369,40 @@ export default class implements PerfettoPlugin {
         chips: removeFalsyValues([
           isKernelThread === 0 && isMainThread === 1 && 'main thread',
         ]),
-        track: new TraceProcessorSliceTrack(ctx, uri, maxDepth, trackIds),
+        track: trackInstance,
       });
-      addTrack(
+      
+      const trackNode = new TrackNode({
+        uri,
+        title,
+        sortOrder: utid !== undefined || upid !== undefined ? 20 : 0,
+      });
+      
+      // Delegate MemoryTracker tracks to handler (adds to MemoryTracker hierarchy)
+      const handled = this.memoryTrackerHandler.handleSliceTrack(
         ctx,
+        trackIds,
+        type,
+        name,
+        parentId,
+        tracker_name,
+        heap_name,
         topLevelGroup,
         group,
-        upid,
-        utid,
-        new TrackNode({
-          uri,
-          title,
-          sortOrder: utid !== undefined || upid !== undefined ? 20 : 0,
-        }),
+        trackNode,
       );
+      
+      // Only add to normal location if not handled by MemoryTracker handler
+      if (!handled) {
+        addTrack(
+          ctx,
+          topLevelGroup,
+          group,
+          upid,
+          utid,
+          trackNode,
+        );
+      }
     }
   }
 }

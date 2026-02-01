@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# This file has been modified by Hailo Technologies Ltd.
 
 import("../../../../gn/test.gni")
 
@@ -61,6 +63,10 @@ source_set("full") {
     "virtio_gpu_tracker.h",
     "virtio_video_tracker.cc",
     "virtio_video_tracker.h",
+    "hailo_cma_tracker.cc",
+    "hailo_cma_tracker.h",
+    "hailo_memory_tracker.cc",
+    "hailo_memory_tracker.h",
   ]
   deps = [
     ":ftrace_descriptors",

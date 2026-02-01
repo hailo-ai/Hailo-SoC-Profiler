@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #include "src/trace_processor/importers/ftrace/ftrace_parser.h"
@@ -55,6 +57,7 @@
 #include "src/trace_processor/importers/ftrace/binder_tracker.h"
 #include "src/trace_processor/importers/ftrace/ftrace_descriptors.h"
 #include "src/trace_processor/importers/ftrace/ftrace_sched_event_tracker.h"
+#include "src/trace_processor/importers/ftrace/hailo_memory_tracker.h"
 #include "src/trace_processor/importers/ftrace/pkvm_hyp_cpu_tracker.h"
 #include "src/trace_processor/importers/ftrace/v4l2_tracker.h"
 #include "src/trace_processor/importers/ftrace/virtio_video_tracker.h"
@@ -1483,7 +1486,8 @@ void FtraceParser::ParseGenericFtrace(int64_t ts,
                                       uint32_t tid,
                                       ConstBytes blob) {
   protos::pbzero::GenericFtraceEvent::Decoder evt(blob);
-  StringId event_id = context_->storage->InternString(evt.event_name());
+  base::StringView event_name = evt.event_name();
+  StringId event_id = context_->storage->InternString(event_name);
   UniqueTid utid = context_->process_tracker->GetOrCreateThread(tid);
   auto ucpu = context_->cpu_tracker->GetOrCreateCpu(cpu);
   tables::FtraceEventTable::Id id =
@@ -1492,6 +1496,11 @@ void FtraceParser::ParseGenericFtrace(int64_t ts,
           .id;
   auto inserter = context_->args_tracker->AddArgsTo(id);
 
+  // Check if this is a memory tracker event and forward to handler
+  HailoMemoryTracker::GetOrCreate(context_)->ParseMemoryTrackerEventFromFtrace(
+      ts, tid, event_name, evt);
+
+  // Continue with normal processing to add args to the ftrace table
   for (auto it = evt.field(); it; ++it) {
     protos::pbzero::GenericFtraceEvent::Field::Decoder fld(*it);
     auto field_name_id = context_->storage->InternString(fld.name());
@@ -1527,6 +1536,7 @@ void FtraceParser::ParseTypedFtraceToRaw(
 
   FtraceMessageDescriptor* m = GetMessageDescriptorForId(ftrace_id);
   const auto& message_strings = ftrace_message_strings_[ftrace_id];
+  base::StringView event_name = context_->storage->GetString(message_strings.message_name_id);
   UniqueTid utid = context_->process_tracker->GetOrCreateThread(tid);
   auto ucpu = context_->cpu_tracker->GetOrCreateCpu(cpu);
   tables::FtraceEventTable::Id id =
@@ -1536,6 +1546,11 @@ void FtraceParser::ParseTypedFtraceToRaw(
           .id;
   auto inserter = context_->args_tracker->AddArgsTo(id);
 
+  // Check if this is a memory tracker event and forward to handler
+  HailoMemoryTracker::GetOrCreate(context_)->ParseMemoryTrackerEventFromTypedFtrace(
+      timestamp, tid, event_name, blob, m, message_strings.message_name_id, message_strings.field_name_ids.data());
+
+  // Continue with normal processing to add args to the ftrace table
   for (auto fld = decoder.ReadField(); fld.valid(); fld = decoder.ReadField()) {
     uint32_t field_id = fld.id();
     if (PERFETTO_UNLIKELY(field_id >= kMaxFtraceEventFields)) {

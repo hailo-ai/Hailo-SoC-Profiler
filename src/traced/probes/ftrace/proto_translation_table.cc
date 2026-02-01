@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * 
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #include "src/traced/probes/ftrace/proto_translation_table.h"
@@ -300,6 +302,20 @@ bool InferFtraceType(const std::string& type_and_name,
       *out = kFtraceUint64;
       return true;
     }
+  }
+
+  // Parsing of mem_tracker raw_stack_entries array fields (any size)
+  //    field:unsigned long raw_stack_entries[N];
+  //    field:unsigned long alloc_raw_stack_entries[N];
+  //    field:unsigned long free_raw_stack_entries[N];
+  // Treat as fixed string so we can read the full array as bytes
+  // Check if it matches "unsigned long [<prefix>_]raw_stack_entries[<number>]"
+  // and size is a multiple of sizeof(unsigned long) (8 bytes on 64-bit)
+  if (Contains(type_and_name, "unsigned long ") && 
+      Contains(type_and_name, "raw_stack_entries[") &&
+      size > 0 && (size % sizeof(unsigned long) == 0)) {
+    *out = kFtraceFixedCString;
+    return true;
   }
 
   if (Contains(type_and_name, "char[] ")) {

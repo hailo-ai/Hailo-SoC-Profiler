@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #ifndef SRC_TRACE_PROCESSOR_TYPES_TRACE_PROCESSOR_CONTEXT_H_
@@ -168,6 +170,8 @@ class TraceProcessorContext {
   std::unique_ptr<Destructible> etm_tracker;                            // EtmTracker
   std::unique_ptr<Destructible> elf_tracker;                            // ElfTracker
   std::unique_ptr<Destructible> file_tracker;                           // FileTracker
+  std::unique_ptr<Destructible> hailo_memory_tracker;                   // HailoMemoryTracker
+  std::unique_ptr<Destructible> hailo_cma_tracker;                      // HailoCmaTracker
   // clang-format on
 
   std::unique_ptr<ProtoTraceParser> proto_trace_parser;

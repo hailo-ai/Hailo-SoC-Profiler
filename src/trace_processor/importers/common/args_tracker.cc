@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * 
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #include "src/trace_processor/importers/common/args_tracker.h"
@@ -36,7 +38,16 @@ namespace perfetto::trace_processor {
 ArgsTracker::ArgsTracker(TraceProcessorContext* context) : context_(context) {}
 
 ArgsTracker::~ArgsTracker() {
-  Flush();
+  // Only flush if we have args. Flush() already checks for empty args_,
+  // but checking here prevents unnecessary calls when args_ is empty.
+  // Also check context_ validity to prevent crashes during destruction
+  // when GlobalArgsTracker may already be invalid.
+  if (!args_.empty() && context_ != nullptr) {
+    // Check if global_args_tracker is still valid before flushing
+    if (context_->global_args_tracker != nullptr) {
+      Flush();
+    }
+  }
 }
 
 void ArgsTracker::AddArg(ColumnLegacy* arg_set_id,

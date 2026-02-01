@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * 
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #include "src/trace_processor/trace_processor_storage_impl.h"
@@ -39,6 +41,7 @@
 #include "src/trace_processor/importers/common/stack_profile_tracker.h"
 #include "src/trace_processor/importers/common/trace_file_tracker.h"
 #include "src/trace_processor/importers/common/track_compressor.h"
+#include "src/trace_processor/importers/ftrace/hailo_memory_tracker.h"
 #include "src/trace_processor/importers/proto/default_modules.h"
 #include "src/trace_processor/importers/proto/packet_analyzer.h"
 #include "src/trace_processor/importers/proto/perf_sample_tracker.h"
@@ -131,6 +134,7 @@ base::Status TraceProcessorStorageImpl::NotifyEndOfFile() {
   }
 
   context_.event_tracker->FlushPendingEvents();
+  HailoMemoryTracker::GetOrCreate(&context_)->FlushPendingAllocations();
   context_.slice_tracker->FlushPendingSlices();
   context_.args_tracker->Flush();
   context_.process_tracker->NotifyEndOfFile();

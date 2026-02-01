@@ -12,6 +12,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * 
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #include <cinttypes>
@@ -308,6 +310,19 @@ void SliceTracker::FlushPendingSlices() {
   // TODO(eseckler): Reconsider whether we want to close pending slices by
   // setting their duration to |trace_end - event_start|. Might still want some
   // additional way of flagging these events as "incomplete" to the UI.
+
+  // CRITICAL: Flush ALL ArgsTracker instances that don't need translation BEFORE
+  // processing translatable args. This prevents destructors from trying to flush
+  // when stacks are cleared, which can cause crashes if GlobalArgsTracker is invalid.
+  for (auto it = stacks_.GetIterator(); it; ++it) {
+    auto& track_info = it.value();
+    for (auto& slice_info : track_info.slice_stack) {
+      // Flush non-translatable args immediately (before MaybeAddTranslatableArgs moves them)
+      if (!slice_info.args_tracker.NeedsTranslation(*context_->args_translation_table)) {
+        slice_info.args_tracker.Flush();
+      }
+    }
+  }
 
   // Make sure that args for all incomplete slice are translated.
   for (auto it = stacks_.GetIterator(); it; ++it) {

@@ -12,12 +12,15 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * 
+ * This file has been modified by Hailo Technologies Ltd.
  */
 
 #include "src/traced/probes/ftrace/cpu_reader.h"
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <cstring>
 
 #include <algorithm>
 #include <optional>
@@ -831,6 +834,16 @@ bool CpuReader::ParseField(const Field& field,
       return true;
     case kFixedCStringToString:
       // TODO(hjd): Kernel-dive to check this how size:0 char fields work.
+      // Special case: if field name ends with "_raw_stack_entries", read as raw bytes
+      // (not null-terminated string) since it's actually an array of uint64_t
+      if (field.ftrace_name && 
+          (strcmp(field.ftrace_name, "raw_stack_entries") == 0 ||
+           strcmp(field.ftrace_name, "alloc_raw_stack_entries") == 0 ||
+           strcmp(field.ftrace_name, "free_raw_stack_entries") == 0)) {
+        // Read entire array as bytes (don't stop at null terminator)
+        message->AppendBytes(field_id, reinterpret_cast<const char*>(field_start), field.ftrace_size);
+        return true;
+      }
       ReadIntoString(field_start, field.ftrace_size, field_id, message);
       return true;
     case kCStringToString:

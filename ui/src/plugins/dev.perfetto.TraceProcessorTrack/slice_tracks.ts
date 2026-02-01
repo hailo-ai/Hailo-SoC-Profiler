@@ -11,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// This file has been modified by Hailo Technologies Ltd.
 
 import {StandardGroup} from '../dev.perfetto.StandardGroups';
 
@@ -225,5 +227,25 @@ export const SLICE_TRACK_SCHEMAS: ReadonlyArray<SliceTrackTypeSchema> = [
     type: 'thread_execution',
     topLevelGroup: 'THREAD',
     group: undefined,
+  },
+  {
+    type: 'MemoryTracker',
+    topLevelGroup: 'MEMORY',
+    group: {name: 'Hailo Memory Trackers', expanded: true},
+  },
+  {
+    type: 'MemoryTrackerEvents',
+    topLevelGroup: 'MEMORY',
+    group: {name: 'Hailo Memory Trackers', expanded: true},
+  },
+  {
+    type: 'MemoryTrackerHist',
+    topLevelGroup: 'MEMORY',
+    group: {name: 'Hailo Memory Trackers', expanded: true},
+  },
+  {
+    type: 'CmaHeapStatsEvents',
+    topLevelGroup: 'MEMORY',
+    group: {name: 'Hailo Memory Trackers', expanded: true},
   },
 ];

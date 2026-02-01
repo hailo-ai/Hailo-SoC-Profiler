@@ -11,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// This file has been modified by Hailo Technologies Ltd.
 
 import {CounterOptions} from '../../components/tracks/base_counter_track';
 import {TopLevelTrackGroup, TrackGroupSchema} from './types';
@@ -423,4 +425,14 @@ export const COUNTER_TRACK_SCHEMAS: ReadonlyArray<CounterTrackTypeSchema> = [
     topLevelGroup: 'THREAD',
     group: undefined,
   },
+  {
+    type: 'MemoryTrackerTotals',
+    topLevelGroup: 'MEMORY',
+    group: { name: 'Hailo Memory Trackers', expanded: true },
+  },
+  {
+    type: 'CmaHeapStats',
+    topLevelGroup: 'MEMORY',
+    group: { name: 'Hailo Memory Trackers', expanded: true },
+  }
 ];
