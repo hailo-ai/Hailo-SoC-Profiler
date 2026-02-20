@@ -9,6 +9,7 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -158,21 +159,22 @@ static constexpr auto kHailoMemoryTrackerTotalsParentBlueprint =
     );
 
 // Blueprint for mem_tracker totals counter track with tracker_name and memory_pool dimensions
+// Note: "∑ Total" uses sum symbol (U+2211) to indicate aggregate and sort after device names
 static constexpr auto kHailoMemoryTrackerTotalsBlueprint =
     tracks::CounterBlueprint(
         "MemoryTrackerTotals",
         tracks::StaticUnitBlueprint("bytes"),
         tracks::DimensionBlueprints(
             tracks::StringDimensionBlueprint("tracker_name"),  // Creates "CMA" group
-            tracks::StringDimensionBlueprint("memory_pool")   // Creates per-pool or "Total" tracks
+            tracks::StringDimensionBlueprint("memory_pool")   // Creates per-pool or "∑ Total" tracks
         ),
         tracks::FnNameBlueprint([](base::StringView /* tracker_name_dim */, base::StringView memory_pool) {
-            if (memory_pool.size() > 0 && memory_pool != base::StringView("Total")) {
+            if (memory_pool.size() > 0 && memory_pool != base::StringView("∑ Total")) {
                 return base::StackString<128>("%.*s",
                                              static_cast<int>(memory_pool.size()),
                                              memory_pool.data());
             }
-            return base::StackString<128>("Total");
+            return base::StackString<128>("∑ Total");
         })
     );
 } // namespace
@@ -204,7 +206,8 @@ void HailoMemoryTracker::ParseMemTrackerEvent(int64_t timestamp,
                                               std::optional<int32_t> tracepoint_pid,
                                               std::optional<uint64_t> tracepoint_timestamp,
                                               StringId stack_trace,
-                                              StringId memory_pool) {
+                                              StringId memory_pool,
+                                              StringId device_name) {
     // Validate we have essential data - use fallback if missing
     StringId actual_tracker_name = tracker_name;
     if (tracker_name.is_null()) {
@@ -230,7 +233,8 @@ void HailoMemoryTracker::ParseMemTrackerEvent(int64_t timestamp,
         tracepoint_pid,
         tracepoint_timestamp,
         stack_trace,
-        memory_pool
+        memory_pool,
+        device_name
     };
     
     // Get the track for mem_tracker events - separate tracks per tracker_name and event_type
@@ -336,25 +340,26 @@ void HailoMemoryTracker::ParseMemTrackerEvent(int64_t timestamp,
         return;
     }
     
-    uint64_t uid = event_data.allocation_uid;
+    // Use composite key (tracker_name, allocation_uid) since each tracker has its own UID counter
+    TrackerUidKey key = {event_data.tracker_name.raw_id(), event_data.allocation_uid};
     std::lock_guard<std::mutex> lock(uid_to_alloc_marker_mutex_);
     
     if (event_data.event_type == alloc_string_id) {
-        // Store ALLOC marker slice_id for this allocation_uid
-        uid_to_alloc_marker_[uid] = marker_id;
+        // Store ALLOC marker slice_id for this (tracker_name, allocation_uid)
+        uid_to_alloc_marker_[key] = marker_id;
     } else if (event_data.event_type == free_string_id) {
-        // Store FREE marker slice_id for this allocation_uid (for linking with hist slices)
+        // Store FREE marker slice_id for this (tracker_name, allocation_uid) (for linking with hist slices)
         {
             std::lock_guard<std::mutex> free_lock(uid_to_free_marker_mutex_);
-            uid_to_free_marker_[uid] = marker_id;
+            uid_to_free_marker_[key] = marker_id;
         }
         
         // Look up corresponding ALLOC event and create flow
         // Don't erase the ALLOC entry yet - we need it for hist slice flows later
-        auto it = uid_to_alloc_marker_.find(uid);
+        auto it = uid_to_alloc_marker_.find(key);
         if (it != uid_to_alloc_marker_.end() && it->second.has_value()) {
             context_->flow_tracker->InsertFlow(it->second.value(), marker_id.value());
-            PERFETTO_DLOG("HailoMemoryTracker: Created flow from ALLOC to FREE for allocation_uid %" PRIu64, uid);
+            PERFETTO_DLOG("HailoMemoryTracker: Created flow from ALLOC to FREE for allocation_uid %" PRIu64, event_data.allocation_uid);
         } else {
             PERFETTO_DLOG("HailoMemoryTracker: FREE event for address 0x%" PRIx64 " has no matching ALLOC", event_data.address);
         }
@@ -372,6 +377,7 @@ void HailoMemoryTracker::ParseMemTrackerHistEvent(int64_t /* timestamp */,
                                                   uint64_t alloc_timestamp,
                                                   StringId alloc_stack_trace,
                                                   StringId memory_pool,
+                                                  StringId device_name,
                                                   bool freed,
                                                   StringId free_process,
                                                   int32_t free_pid,
@@ -401,6 +407,7 @@ void HailoMemoryTracker::ParseMemTrackerHistEvent(int64_t /* timestamp */,
         alloc_timestamp,
         alloc_stack_trace,
         memory_pool,
+        device_name,
         freed,
         free_process,
         free_pid,
@@ -416,19 +423,21 @@ void HailoMemoryTracker::ParseMemTrackerHistEvent(int64_t /* timestamp */,
 
 std::vector<HailoMemoryTracker::AllocationData> HailoMemoryTracker::DeduplicateAndSortAllocations(
     const std::vector<AllocationData>& allocations) {
-    // Deduplicate by allocation_uid: prefer freed=true over freed=false (complete information)
-    std::unordered_map<uint64_t, AllocationData> deduplicated;
+    // Deduplicate by (tracker_name, allocation_uid): prefer freed=true over freed=false (complete information)
+    // Each tracker has its own UID counter, so we need to include tracker_name in the key
+    std::unordered_map<TrackerUidKey, AllocationData, TrackerUidKeyHash> deduplicated;
     for (const auto& alloc : allocations) {
         // Skip entries with invalid UID (0)
         if (alloc.allocation_uid == 0) {
             continue;
         }
         
-        auto it = deduplicated.find(alloc.allocation_uid);
+        TrackerUidKey key = {alloc.tracker_name.raw_id(), alloc.allocation_uid};
+        auto it = deduplicated.find(key);
         
         if (it == deduplicated.end()) {
-            // First entry for this allocation_uid
-            deduplicated[alloc.allocation_uid] = alloc;
+            // First entry for this (tracker_name, allocation_uid)
+            deduplicated[key] = alloc;
         } else {
             // Duplicate found - prefer freed=true over freed=false
             if (alloc.freed && !it->second.freed) {
@@ -466,8 +475,69 @@ void HailoMemoryTracker::FlushPendingAllocations() {
     // Initialize counters from allocation history
     InitializeTotalsCounters(unique_allocations);
     
-    // Create slices in allocation time order
-    for (const auto& alloc : unique_allocations) {
+    // Group allocations by tracker_name for per-track depth calculation
+    // This is critical because depths must be contiguous within each track to avoid visual gaps
+    std::unordered_map<uint32_t, std::vector<size_t>> allocations_by_tracker;
+    for (size_t i = 0; i < unique_allocations.size(); i++) {
+        allocations_by_tracker[unique_allocations[i].tracker_name.raw_id()].push_back(i);
+    }
+    
+    // Calculate depths per tracker and store in a map
+    std::unordered_map<size_t, uint32_t> alloc_depths;  // alloc_index -> depth
+    
+    for (auto& [tracker_id, indices] : allocations_by_tracker) {
+        // Sort this tracker's allocations by start time
+        std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
+            const auto& alloc_a = unique_allocations[a];
+            const auto& alloc_b = unique_allocations[b];
+            int64_t ts_a = (alloc_a.alloc_timestamp > 0) 
+                           ? static_cast<int64_t>(alloc_a.alloc_timestamp)
+                           : static_cast<int64_t>(alloc_a.free_timestamp);
+            int64_t ts_b = (alloc_b.alloc_timestamp > 0) 
+                           ? static_cast<int64_t>(alloc_b.alloc_timestamp)
+                           : static_cast<int64_t>(alloc_b.free_timestamp);
+            return ts_a < ts_b;
+        });
+        
+        // Assign depths using interval scheduling - reuse depths when slices end
+        // This is efficient AND gap-free because we calculate per-tracker
+        std::vector<int64_t> depth_end_times;  // depth_end_times[d] = end time of slice at depth d
+        
+        for (size_t idx : indices) {
+            const auto& alloc = unique_allocations[idx];
+            int64_t start_ts = (alloc.alloc_timestamp > 0) 
+                               ? static_cast<int64_t>(alloc.alloc_timestamp) 
+                               : static_cast<int64_t>(alloc.free_timestamp);
+            int64_t end_ts = alloc.freed ? static_cast<int64_t>(alloc.free_timestamp) : INT64_MAX;
+            
+            // Find the lowest depth where the previous slice has ended
+            uint32_t depth = 0;
+            bool found = false;
+            for (size_t d = 0; d < depth_end_times.size(); d++) {
+                if (start_ts >= depth_end_times[d]) {
+                    // This depth is available - previous slice has ended
+                    depth = static_cast<uint32_t>(d);
+                    depth_end_times[d] = end_ts;
+                    found = true;
+                    break;
+                }
+            }
+            
+            if (!found) {
+                // No available depth - need a new one
+                depth = static_cast<uint32_t>(depth_end_times.size());
+                depth_end_times.push_back(end_ts);
+            }
+            
+            alloc_depths[idx] = depth;
+        }
+    }
+    
+    // Create slices with calculated depths (process in original order for consistent flows)
+    for (size_t alloc_idx = 0; alloc_idx < unique_allocations.size(); alloc_idx++) {
+        const auto& alloc = unique_allocations[alloc_idx];
+        uint32_t depth = alloc_depths[alloc_idx];
+        
         // Get the track for "Allocations History" under tracker_name
         base::StringView tracker_name_raw = context_->storage->GetString(alloc.tracker_name);
         std::string tracker_name_upper = tracker_name_raw.ToStdString();
@@ -480,7 +550,7 @@ void HailoMemoryTracker::FlushPendingAllocations() {
             tracks::Dimensions(tracker_name_str)
         );
         
-        // Calculate slice start timestamp - use alloc_timestamp
+        // Calculate slice start timestamp
         int64_t slice_start_ts = (alloc.alloc_timestamp > 0) 
                                   ? static_cast<int64_t>(alloc.alloc_timestamp) 
                                   : static_cast<int64_t>(alloc.free_timestamp);
@@ -495,70 +565,71 @@ void HailoMemoryTracker::FlushPendingAllocations() {
         StringId slice_name_id = context_->storage->InternString(slice_name.string_view());
         StringId slice_category = alloc.memory_pool.is_null() ? alloc.tracker_name : alloc.memory_pool;
         
-        // Create slice - use Begin() for unterminated allocations (kPendingDuration = -1)
-        // and Scoped() for terminated allocations (with explicit duration)
-        std::optional<SliceId> hist_slice_id;
+        // Calculate duration for the slice table
+        int64_t duration;
         if (alloc.freed) {
-            // Terminated allocation: use Scoped() with explicit duration
-            int64_t duration = static_cast<int64_t>(alloc.free_timestamp) - slice_start_ts;
+            duration = static_cast<int64_t>(alloc.free_timestamp) - slice_start_ts;
+            PERFETTO_DLOG("HailoMemoryTracker: Creating hist slice: UID=%" PRIu64 " address=0x%" PRIx64 
+                        " start_ts=%" PRId64 " free_ts=%" PRIu64 " duration=%" PRId64 "ns (%.3fms) depth=%u",
+                        alloc.allocation_uid, alloc.address, slice_start_ts, 
+                        alloc.free_timestamp, duration, duration / 1000000.0, depth);
             if (duration < 0) {
                 PERFETTO_LOG("HailoMemoryTracker: Negative duration for address 0x%" PRIx64
                             " (start=%" PRId64 " free=%" PRIu64 ")",
                             alloc.address, slice_start_ts, alloc.free_timestamp);
                 duration = 0;
             }
-            hist_slice_id = context_->slice_tracker->Scoped(
-                slice_start_ts,  // Use alloc_timestamp for correct ordering
-                track_id,
-                slice_category,
-                slice_name_id,
-                duration,
-                [this, alloc] (ArgsTracker::BoundInserter* inserter) {
-                    AddHistEventArgs(inserter, alloc, alloc.alloc_stack_trace, alloc.free_stack_trace);
-                }
-            );
         } else {
-            // Unterminated allocation: use Begin() to create slice with kPendingDuration = -1
-            // This creates an "incomplete" slice that extends indefinitely without an endpoint
-            hist_slice_id = context_->slice_tracker->Begin(
-                slice_start_ts,  // Use alloc_timestamp for correct ordering
-                track_id,
-                slice_category,
-                slice_name_id,
-                [this, alloc] (ArgsTracker::BoundInserter* inserter) {
-                    AddHistEventArgs(inserter, alloc, alloc.alloc_stack_trace, alloc.free_stack_trace);
-                }
-            );
-            PERFETTO_DLOG("HailoMemoryTracker: Unterminated allocation 0x%" PRIx64 " created with pending duration (start=%" PRId64 ")",
-                          alloc.address, slice_start_ts);
+            // Unterminated allocation: use -1 duration (kPendingDuration)
+            duration = -1;
+            PERFETTO_DLOG("HailoMemoryTracker: Unterminated allocation 0x%" PRIx64 " depth=%u",
+                          alloc.address, depth);
         }
+        
+        // Directly insert into slice table to bypass SliceTracker's stack-based nesting
+        auto* slice_table = context_->storage->mutable_slice_table();
+        tables::SliceTable::Row row;
+        row.ts = slice_start_ts;
+        row.dur = duration;
+        row.track_id = track_id;
+        row.category = slice_category;
+        row.name = slice_name_id;
+        row.depth = depth;  // Use per-tracker calculated depth for proper visual stacking
+        
+        auto slice_id = slice_table->Insert(row).id;
+        std::optional<SliceId> hist_slice_id = slice_id;
+        
+        // Add arguments using ArgsTracker
+        auto args_inserter = context_->args_tracker->AddArgsTo(slice_id);
+        AddHistEventArgs(&args_inserter, alloc, alloc.alloc_stack_trace, alloc.free_stack_trace);
         
         // Create flows: ALLOC event → hist slice → FREE event
         // Only create flows if we have a valid allocation_uid (non-zero)
         if (hist_slice_id.has_value() && alloc.allocation_uid != 0) {
-            uint64_t uid = alloc.allocation_uid;
+            // Use composite key (tracker_name, allocation_uid) since each tracker has its own UID counter
+            TrackerUidKey key = {alloc.tracker_name.raw_id(), alloc.allocation_uid};
             
             // Link ALLOC marker to hist slice
             {
                 std::lock_guard<std::mutex> alloc_lock(uid_to_alloc_marker_mutex_);
-                auto alloc_it = uid_to_alloc_marker_.find(uid);
+                auto alloc_it = uid_to_alloc_marker_.find(key);
                 if (alloc_it != uid_to_alloc_marker_.end() && alloc_it->second.has_value()) {
                     context_->flow_tracker->InsertFlow(alloc_it->second.value(), hist_slice_id.value());
                     // Now we can remove the ALLOC entry since we've created the hist slice flow
                     uid_to_alloc_marker_.erase(alloc_it);
-                    PERFETTO_DLOG("HailoMemoryTracker: Created flow from ALLOC marker to hist slice for allocation_uid %" PRIu64, uid);
+                    PERFETTO_DLOG("HailoMemoryTracker: Created flow from ALLOC marker to hist slice for allocation_uid %" PRIu64, alloc.allocation_uid);
                 }
             }
             
             // Link hist slice to FREE marker
             {
                 std::lock_guard<std::mutex> free_lock(uid_to_free_marker_mutex_);
-                auto free_it = uid_to_free_marker_.find(uid);
+                auto free_it = uid_to_free_marker_.find(key);
                 if (free_it != uid_to_free_marker_.end() && free_it->second.has_value()) {
                     context_->flow_tracker->InsertFlow(hist_slice_id.value(), free_it->second.value());
                     // Remove the FREE entry after creating the flow
                     uid_to_free_marker_.erase(free_it);
-                    PERFETTO_DLOG("HailoMemoryTracker: Created flow from hist slice to FREE marker for allocation_uid %" PRIu64, uid);
+                    PERFETTO_DLOG("HailoMemoryTracker: Created flow from hist slice to FREE marker for allocation_uid %" PRIu64, alloc.allocation_uid);
                 }
             }
         }
@@ -587,6 +658,11 @@ void HailoMemoryTracker::AddEventMarkerArgs(ArgsTracker::BoundInserter* inserter
     if (!event.memory_pool.is_null()) {
         inserter->AddArg(context_->storage->InternString("memory_pool"),
                        Variadic::String(event.memory_pool));
+    }
+    // Store device_name (e.g., "7c040000.xrp" - the device that triggered the allocation)
+    if (!event.device_name.is_null()) {
+        inserter->AddArg(context_->storage->InternString("device"),
+                       Variadic::String(event.device_name));
     }
     // Add process name and PID as separate fields
     if (!event.process_name.is_null()) {
@@ -644,6 +720,11 @@ void HailoMemoryTracker::AddHistEventArgs(ArgsTracker::BoundInserter* inserter,
     if (!alloc.memory_pool.is_null()) {
         inserter->AddArg(context_->storage->InternString("memory_pool"),
                        Variadic::String(alloc.memory_pool));
+    }
+    // Store device_name (e.g., "7c040000.xrp" - the device that triggered the allocation)
+    if (!alloc.device_name.is_null()) {
+        inserter->AddArg(context_->storage->InternString("device"),
+                       Variadic::String(alloc.device_name));
     }
     if (!alloc.alloc_process.is_null()) {
         inserter->AddArg(context_->storage->InternString("alloc_process"),
@@ -724,12 +805,25 @@ void HailoMemoryTracker::InitializeTotalsCounters(const std::vector<AllocationDa
     for (const auto& [tracker_name, tracker_allocations] : allocations_by_tracker) {
         // Build chronological event list: (timestamp, size_delta, memory_pool)
         std::vector<std::tuple<int64_t, int64_t, StringId>> counter_events;
+        
+        // Also collect unique memory pools for pre-creating tracks in sorted order
+        std::set<std::string> unique_pools;
+        
         for (const auto& alloc : tracker_allocations) {
             int64_t alloc_ts = static_cast<int64_t>(alloc.alloc_timestamp);
             StringId memory_pool = alloc.memory_pool.is_null() 
                                    ? context_->storage->InternString("") 
                                    : alloc.memory_pool;
             counter_events.push_back({alloc_ts, static_cast<int64_t>(alloc.size), memory_pool});
+            
+            // Collect pool name for track ordering
+            base::StringView pool_str = memory_pool.is_null() 
+                                        ? base::StringView("") 
+                                        : context_->storage->GetString(memory_pool);
+            if (pool_str.size() > 0) {
+                unique_pools.insert(pool_str.ToStdString());
+            }
+            
             if (alloc.freed) {
                 int64_t free_ts = static_cast<int64_t>(alloc.free_timestamp);
                 counter_events.push_back({free_ts, -static_cast<int64_t>(alloc.size), memory_pool});
@@ -745,18 +839,45 @@ void HailoMemoryTracker::InitializeTotalsCounters(const std::vector<AllocationDa
                        tracker_name_upper.begin(), ::toupper);
         base::StringView tracker_name_str(tracker_name_upper);
         
-        // Create parent "Size Totals" track first
+        // Create parent "Totals" track first
         TrackId totals_parent_track_id = context_->track_tracker->InternTrack(
             kHailoMemoryTrackerTotalsParentBlueprint,
             tracks::Dimensions(tracker_name_str)
         );
         
+        auto* track_table = context_->storage->mutable_track_table();
+        
+        // Pre-create tracks in sorted order: individual pools first (alphabetically), then "Total" last
+        // This ensures consistent track ordering in the UI
+        std::unordered_map<std::string, TrackId> pool_track_ids;
+        
+        for (const auto& pool_name : unique_pools) {
+            base::StringView pool_str(pool_name);
+            TrackId pool_track_id = context_->track_tracker->InternTrack(
+                kHailoMemoryTrackerTotalsBlueprint,
+                tracks::Dimensions(tracker_name_str, pool_str)
+            );
+            auto pool_track_row = track_table->FindById(pool_track_id);
+            if (pool_track_row) {
+                pool_track_row->set_parent_id(totals_parent_track_id);
+            }
+            pool_track_ids[pool_name] = pool_track_id;
+        }
+        
+        // Create "Total" track last so it appears at the bottom
+        TrackId total_track_id = context_->track_tracker->InternTrack(
+            kHailoMemoryTrackerTotalsBlueprint,
+            tracks::Dimensions(tracker_name_str, base::StringView("∑ Total"))
+        );
+        auto total_track_row = track_table->FindById(total_track_id);
+        if (total_track_row) {
+            total_track_row->set_parent_id(totals_parent_track_id);
+        }
+        
         // Process events chronologically to build cumulative counters
         std::lock_guard<std::mutex> totals_lock(totals_mutex_);
         std::unordered_map<StringId, int64_t> pool_totals;  // Per-pool totals
         int64_t tracker_total = 0;  // Overall tracker total
-        
-        auto* track_table = context_->storage->mutable_track_table();
         
         for (const auto& [ts, delta, memory_pool] : counter_events) {
             // Update per-pool total
@@ -771,16 +892,18 @@ void HailoMemoryTracker::InitializeTotalsCounters(const std::vector<AllocationDa
                                                ? base::StringView("") 
                                                : context_->storage->GetString(memory_pool);
             
-            // Update per-pool counter track
-            TrackId pool_track_id = context_->track_tracker->InternTrack(
-                kHailoMemoryTrackerTotalsBlueprint,
-                tracks::Dimensions(tracker_name_str, memory_pool_str)
-            );
-            
-            // Set parent_id for the pool track
-            auto pool_track_row = track_table->FindById(pool_track_id);
-            if (pool_track_row) {
-                pool_track_row->set_parent_id(totals_parent_track_id);
+            // Get pre-created per-pool counter track
+            TrackId pool_track_id;
+            std::string pool_name_std = memory_pool_str.ToStdString();
+            auto it = pool_track_ids.find(pool_name_std);
+            if (it != pool_track_ids.end()) {
+                pool_track_id = it->second;
+            } else {
+                // Fallback: create track if not found (shouldn't happen)
+                pool_track_id = context_->track_tracker->InternTrack(
+                    kHailoMemoryTrackerTotalsBlueprint,
+                    tracks::Dimensions(tracker_name_str, memory_pool_str)
+                );
             }
             
             context_->event_tracker->PushCounter(
@@ -789,18 +912,7 @@ void HailoMemoryTracker::InitializeTotalsCounters(const std::vector<AllocationDa
                 pool_track_id
             );
             
-            // Update overall total counter track
-            TrackId total_track_id = context_->track_tracker->InternTrack(
-                kHailoMemoryTrackerTotalsBlueprint,
-                tracks::Dimensions(tracker_name_str, base::StringView("Total"))
-            );
-            
-            // Set parent_id for the total track
-            auto total_track_row = track_table->FindById(total_track_id);
-            if (total_track_row) {
-                total_track_row->set_parent_id(totals_parent_track_id);
-            }
-            
+            // Push to overall total counter track (already created above)
             context_->event_tracker->PushCounter(
                 ts,
                 static_cast<double>(tracker_total),
@@ -845,6 +957,7 @@ bool HailoMemoryTracker::ParseMemoryTrackerEventFromFtrace(int64_t timestamp,
     if (is_mem_tracker) {
         StringId tracker_name_id = kNullStringId;
         StringId memory_pool_id = kNullStringId;
+        StringId device_name_id = kNullStringId;
         StringId event_type_id = kNullStringId;
         uint64_t address = 0;
         uint64_t size = 0;
@@ -895,6 +1008,8 @@ bool HailoMemoryTracker::ParseMemoryTrackerEventFromFtrace(int64_t timestamp,
                     tracker_name_id = str_value;
                 } else if (field_name == "memory_pool") {
                     memory_pool_id = str_value;
+                } else if (field_name == "device_name") {
+                    device_name_id = str_value;
                 } else if (field_name == "event_type") {
                     event_type_id = str_value;
                 } else if (field_name == "process") {
@@ -936,7 +1051,7 @@ bool HailoMemoryTracker::ParseMemoryTrackerEventFromFtrace(int64_t timestamp,
             process_name_id,
             has_tracepoint_pid ? std::make_optional(tracepoint_pid) : std::nullopt,
             has_tracepoint_timestamp ? std::make_optional(tracepoint_timestamp) : std::nullopt,
-            stack_trace_id, memory_pool_id);
+            stack_trace_id, memory_pool_id, device_name_id);
         return true;
     }
     
@@ -953,6 +1068,7 @@ bool HailoMemoryTracker::ParseMemoryTrackerEventFromFtrace(int64_t timestamp,
         std::vector<uint64_t> hist_alloc_stack_entries;
         uint32_t hist_nr_alloc_stack_entries = 0;
         StringId hist_memory_pool_id = kNullStringId;
+        StringId hist_device_name_id = kNullStringId;
         bool hist_freed = false;
         StringId hist_free_process_id = kNullStringId;
         int32_t hist_free_pid = 0;
@@ -1013,6 +1129,8 @@ bool HailoMemoryTracker::ParseMemoryTrackerEventFromFtrace(int64_t timestamp,
                     ParseRawStackEntriesFromBytes(fld.str_value(), hist_nr_alloc_stack_entries, hist_alloc_stack_entries);
                 } else if (field_name == "memory_pool") {
                     hist_memory_pool_id = value;
+                } else if (field_name == "device_name") {
+                    hist_device_name_id = value;
                 } else if (field_name == "free_process") {
                     hist_free_process_id = value;
                 } else if (field_name == "free_symbolized_stack_trace") {
@@ -1062,7 +1180,7 @@ bool HailoMemoryTracker::ParseMemoryTrackerEventFromFtrace(int64_t timestamp,
         ParseMemTrackerHistEvent(
             timestamp, tid, hist_tracker_name_id, hist_address, hist_size, hist_allocation_uid,
             hist_alloc_process_id, hist_alloc_pid, hist_alloc_timestamp,
-            hist_alloc_stack_trace_id, hist_memory_pool_id,
+            hist_alloc_stack_trace_id, hist_memory_pool_id, hist_device_name_id,
             hist_freed,
             hist_free_process_id, hist_free_pid, hist_free_timestamp,
             hist_free_stack_trace_id);
@@ -1102,6 +1220,7 @@ bool HailoMemoryTracker::ParseMemoryTrackerEventFromTypedFtrace(int64_t timestam
     if (is_mem_tracker) {
         StringId tracker_name_id = kNullStringId;
         StringId memory_pool_id = kNullStringId;
+        StringId device_name_id = kNullStringId;
         StringId event_type_id = kNullStringId;
         uint64_t address = 0;
         uint64_t size = 0;
@@ -1150,12 +1269,13 @@ bool HailoMemoryTracker::ParseMemoryTrackerEventFromTypedFtrace(int64_t timestam
                     has_tracepoint_timestamp = true;
                 }
             } else if (field_name == "tracker_name" || field_name == "memory_pool" ||
-                       field_name == "event_type" || field_name == "process" || 
-                       field_name == "stack_trace") {
+                       field_name == "device_name" || field_name == "event_type" || 
+                       field_name == "process" || field_name == "stack_trace") {
                 if (type == ProtoSchemaType::kString || type == ProtoSchemaType::kBytes) {
                     StringId value = context_->storage->InternString(fld.as_string());
                     if (field_name == "tracker_name") tracker_name_id = value;
                     else if (field_name == "memory_pool") memory_pool_id = value;
+                    else if (field_name == "device_name") device_name_id = value;
                     else if (field_name == "event_type") event_type_id = value;
                     else if (field_name == "process") process_name_id = value;
                     else if (field_name == "stack_trace") stack_trace_id = value;
@@ -1172,7 +1292,7 @@ bool HailoMemoryTracker::ParseMemoryTrackerEventFromTypedFtrace(int64_t timestam
             process_name_id,
             has_tracepoint_pid ? std::make_optional(tracepoint_pid) : std::nullopt,
             has_tracepoint_timestamp ? std::make_optional(tracepoint_timestamp) : std::nullopt,
-            stack_trace_id, memory_pool_id);
+            stack_trace_id, memory_pool_id, device_name_id);
         return true;
     }
     
@@ -1187,6 +1307,7 @@ bool HailoMemoryTracker::ParseMemoryTrackerEventFromTypedFtrace(int64_t timestam
         uint64_t hist_alloc_timestamp = 0;
         StringId hist_alloc_stack_trace_id = kNullStringId;
         StringId hist_memory_pool_id = kNullStringId;
+        StringId hist_device_name_id = kNullStringId;
         bool hist_freed = false;
         StringId hist_free_process_id = kNullStringId;
         int32_t hist_free_pid = 0;
@@ -1228,13 +1349,15 @@ bool HailoMemoryTracker::ParseMemoryTrackerEventFromTypedFtrace(int64_t timestam
                 }
             } else if (field_name == "tracker_name" || field_name == "alloc_process" ||
                        field_name == "alloc_stack_trace" || field_name == "memory_pool" ||
-                       field_name == "free_process" || field_name == "free_stack_trace") {
+                       field_name == "device_name" || field_name == "free_process" || 
+                       field_name == "free_stack_trace") {
                 if (type == ProtoSchemaType::kString || type == ProtoSchemaType::kBytes) {
                     StringId value = context_->storage->InternString(fld.as_string());
                     if (field_name == "tracker_name") hist_tracker_name_id = value;
                     else if (field_name == "alloc_process") hist_alloc_process_id = value;
                     else if (field_name == "alloc_stack_trace") hist_alloc_stack_trace_id = value;
                     else if (field_name == "memory_pool") hist_memory_pool_id = value;
+                    else if (field_name == "device_name") hist_device_name_id = value;
                     else if (field_name == "free_process") hist_free_process_id = value;
                     else if (field_name == "free_stack_trace") hist_free_stack_trace_id = value;
                 }
@@ -1253,7 +1376,7 @@ bool HailoMemoryTracker::ParseMemoryTrackerEventFromTypedFtrace(int64_t timestam
         ParseMemTrackerHistEvent(
             timestamp, tid, hist_tracker_name_id, hist_address, hist_size, hist_allocation_uid,
             hist_alloc_process_id, hist_alloc_pid, hist_alloc_timestamp,
-            hist_alloc_stack_trace_id, hist_memory_pool_id,
+            hist_alloc_stack_trace_id, hist_memory_pool_id, hist_device_name_id,
             hist_freed,
             hist_free_process_id, hist_free_pid, hist_free_timestamp,
             hist_free_stack_trace_id);

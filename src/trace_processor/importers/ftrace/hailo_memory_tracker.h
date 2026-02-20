@@ -59,7 +59,8 @@ public:
                               std::optional<int32_t> tracepoint_pid,
                               std::optional<uint64_t> tracepoint_timestamp,
                               StringId stack_trace,
-                              StringId memory_pool);
+                              StringId memory_pool,
+                              StringId device_name);
 
     // Parse mem_tracker_hist_event
     void ParseMemTrackerHistEvent(int64_t timestamp,
@@ -73,6 +74,7 @@ public:
                                   uint64_t alloc_timestamp,
                                   StringId alloc_stack_trace,
                                   StringId memory_pool,
+                                  StringId device_name,
                                   bool freed,
                                   StringId free_process,
                                   int32_t free_pid,
@@ -123,6 +125,7 @@ private:
         std::optional<uint64_t> tracepoint_timestamp;
         StringId stack_trace;
         StringId memory_pool;
+        StringId device_name;
     };
 
     // Structure to hold allocation data for deferred creation
@@ -136,6 +139,7 @@ private:
         uint64_t alloc_timestamp;
         StringId alloc_stack_trace;
         StringId memory_pool;
+        StringId device_name;
         bool freed;
         StringId free_process;
         int32_t free_pid;
@@ -169,17 +173,31 @@ private:
     StringId mem_free_name_;
     StringId track_name_;
     
-    // Track ALLOC event markers (duration=0 slices) by allocation_uid to connect with FREE events via flows
+    // Composite key for (tracker_name, allocation_uid) - each tracker has its own UID counter
+    struct TrackerUidKey {
+        uint32_t tracker_name_id;
+        uint64_t allocation_uid;
+        bool operator==(const TrackerUidKey& other) const {
+            return tracker_name_id == other.tracker_name_id && allocation_uid == other.allocation_uid;
+        }
+    };
+    struct TrackerUidKeyHash {
+        std::size_t operator()(const TrackerUidKey& k) const {
+            return std::hash<uint32_t>()(k.tracker_name_id) ^ (std::hash<uint64_t>()(k.allocation_uid) << 1);
+        }
+    };
+    
+    // Track ALLOC event markers (duration=0 slices) by (tracker_name, allocation_uid) to connect with FREE events via flows
     std::mutex uid_to_alloc_marker_mutex_;
-    std::unordered_map<uint64_t, std::optional<SliceId>> uid_to_alloc_marker_;
+    std::unordered_map<TrackerUidKey, std::optional<SliceId>, TrackerUidKeyHash> uid_to_alloc_marker_;
     
-    // Track FREE event markers (duration=0 slices) by allocation_uid to connect with hist slices via flows
+    // Track FREE event markers (duration=0 slices) by (tracker_name, allocation_uid) to connect with hist slices via flows
     std::mutex uid_to_free_marker_mutex_;
-    std::unordered_map<uint64_t, std::optional<SliceId>> uid_to_free_marker_;
+    std::unordered_map<TrackerUidKey, std::optional<SliceId>, TrackerUidKeyHash> uid_to_free_marker_;
     
-    // Track hist slices by allocation_uid to connect with ALLOC/FREE events via flows
+    // Track hist slices by (tracker_name, allocation_uid) to connect with ALLOC/FREE events via flows
     std::mutex uid_to_hist_slice_mutex_;
-    std::unordered_map<uint64_t, std::optional<SliceId>> uid_to_hist_slice_;
+    std::unordered_map<TrackerUidKey, std::optional<SliceId>, TrackerUidKeyHash> uid_to_hist_slice_;
 
     // Store allocations for deferred creation (sorted by alloc_timestamp)
     std::mutex pending_allocations_mutex_;
